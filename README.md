@@ -1,0 +1,64 @@
+# Stream Control Panel — OBS управление оверлеем
+
+Панель управления стримом для модератора.
+
+## Возможности
+- Картинки (с ПК или по URL) + перетаскивание в реальном времени
+- Видео (с ПК или по URL) + перетаскивание в реальном времени
+- GIF (с ПК или по URL) + перетаскивание в реальном времени
+- Сайты и YouTube через iframe (YouTube-ссылки автоматически конвертируются в embed)
+- Текст + перетаскивание
+- Таймер (обратный/прямой отсчёт, пауза/возобновление)
+- Управление сценами и источниками OBS (вкл/выкл, перемещение, папки)
+
+## Локальный запуск
+
+```bash
+cd obs-stream-control
+npm install
+npm run dev
+```
+
+Панель: http://localhost:3000/panel
+Оверлей: http://localhost:3000/overlay
+
+## Добавление оверлея в OBS
+1. Источник → Browser Source
+2. URL: http://localhost:3000/overlay
+3. Размер: 1920×1080
+
+## OBS WebSocket
+1. OBS → Tools → WebSocket Server Settings → Enable
+2. Порт: 4455
+3. В панели: вкладка "Управление OBS" → подключиться
+
+## Деплой
+
+⚠️ **Vercel не подходит.** Проект — это постоянный Node-сервер (`server.js`) + Socket.io,
+состояние оверлея живёт в памяти сервера. Vercel — serverless: постоянных процессов и
+WebSocket-соединений там нет, панель и оверлей не смогут синхронизироваться.
+
+### Railway (рекомендуется — работает без изменений кода):
+1. Загрузите код в GitHub-репозиторий:
+   ```bash
+   git init && git add -A && git commit -m "init"
+   git remote add origin https://github.com/<вы>/stream-control.git
+   git push -u origin main
+   ```
+2. [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub repo** → выберите репозиторий.
+3. Railway сам определит Node и выполнит `npm install && npm build && npm start`. Порт подхватится из `process.env.PORT` автоматически.
+4. В сервисе: **Settings → Networking → Generate Domain** — получите публичный URL вида `https://xxx.up.railway.app`.
+5. Панель: `https://xxx.up.railway.app/panel`, оверлей: `https://xxx.up.railway.app/overlay`.
+6. В OBS: источник **Browser Source** → URL оверлея, размер 1920×1080.
+
+### Ограничения медиа «с ПК» (актуально для любого хостинга):
+- Файлы с ПК превращаются в base64 data-URL и хранятся **в памяти сервера**: при рестарте
+  или новом деплое все элементы сбрасываются.
+- Лимит Socket.io — 50 МБ на сообщение; base64 раздувает файл в ~1.37 раза, поэтому видео
+  с ПК больше **~36 МБ** не отправится. Надёжнее добавлять медиа по URL.
+- Весь стейт передаётся каждому клиенту при подключении (`state:init`) — много тяжёлых
+  файлов с ПК замедлит загрузку оверлея и съест RAM (на бесплатном Railway её 512 МБ).
+
+### Vercel — только если переделать архитектуру:
+1. Вынести Socket.io-сервер на отдельный хостинг (Railway/Render) и прописать его URL в PanelClient/OverlayClient.
+2. Либо переписать синхронизацию на REST API + базу (например, Upstash Redis / Supabase) с поллингом — тогда Vercel заработает, но это рефакторинг.
