@@ -47,6 +47,13 @@ export default function OverlayClient() {
 		socket.on('element:deleted', (id: string) =>
 			setState(p => ({ ...p, elements: p.elements.filter(e => e.id !== id) })),
 		)
+		socket.on('element:zorder', (ids: string[]) =>
+			setState(p => {
+				const z = new Map(ids.map((id, i) => [id, i]))
+				return { ...p, elements: p.elements.map(e => ({ ...e, zIndex: z.get(e.id) ?? e.zIndex })) }
+			}),
+		)
+		socket.on('elements:cleared', () => setState(p => ({ ...p, elements: [] })))
 		socket.on('canvas:resize', (dims: { w: number; h: number }) =>
 			setState(p => ({ ...p, canvasW: dims.w, canvasH: dims.h })),
 		)
@@ -55,10 +62,13 @@ export default function OverlayClient() {
 		}
 	}, [])
 
+	// перерисовка нужна только пока идёт хотя бы один таймер
+	const hasRunningTimer = state.elements.some(e => e.type === 'timer' && e.isRunning)
 	useEffect(() => {
+		if (!hasRunningTimer) return
 		const i = setInterval(() => force(x => x + 1), 250)
 		return () => clearInterval(i)
-	}, [])
+	}, [hasRunningTimer])
 
 	useEffect(() => {
 		const update = () => {

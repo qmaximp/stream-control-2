@@ -46,7 +46,7 @@ app.prepare().then(() => {
       const idx = state.elements.findIndex(e => e.id === partial.id);
       if (idx >= 0) {
         state.elements[idx] = { ...state.elements[idx], ...partial };
-        io.emit('element:updated', state.elements[idx]);
+        socket.broadcast.emit('element:updated', state.elements[idx]);
       }
     });
 
@@ -55,8 +55,8 @@ app.prepare().then(() => {
       if (idx >= 0) {
         state.elements[idx].x = data.x;
         state.elements[idx].y = data.y;
+        socket.broadcast.emit('element:moved', data);
       }
-      io.emit('element:moved', data);
     });
 
     socket.on('element:resize', (data) => {
@@ -67,7 +67,7 @@ app.prepare().then(() => {
         if (data.y !== undefined) el.y = data.y;
         el.width = data.width;
         el.height = data.height;
-        io.emit('element:resized', data);
+        socket.broadcast.emit('element:resized', data);
       }
     });
 
@@ -84,14 +84,14 @@ app.prepare().then(() => {
       const zi = state.elements[idx].zIndex;
       state.elements[idx].zIndex = state.elements[swap].zIndex;
       state.elements[swap].zIndex = zi;
-      io.emit('state:init', state);
+      io.emit('element:zorder', state.elements.map(e => e.id));
     });
 
     socket.on('element:toggle-visible', (id) => {
       const idx = state.elements.findIndex(e => e.id === id);
       if (idx >= 0) {
         state.elements[idx].visible = !state.elements[idx].visible;
-        io.emit('element:updated', state.elements[idx]);
+        socket.broadcast.emit('element:updated', state.elements[idx]);
       }
     });
 
@@ -134,7 +134,7 @@ app.prepare().then(() => {
 
     socket.on('elements:clear', () => {
       state.elements = [];
-      io.emit('state:init', state);
+      io.emit('elements:cleared');
     });
   });
 

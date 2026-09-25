@@ -57,6 +57,15 @@ export default function PanelClient() {
     socket.on("element:deleted", (id: string) =>
       setState((p) => ({ ...p, elements: p.elements.filter((e) => e.id !== id) }))
     );
+    socket.on("element:zorder", (ids: string[]) =>
+      setState((p) => {
+        const z = new Map(ids.map((id, i) => [id, i]));
+        return { ...p, elements: p.elements.map((e) => ({ ...e, zIndex: z.get(e.id) ?? e.zIndex })) };
+      })
+    );
+    socket.on("elements:cleared", () =>
+      setState((p) => ({ ...p, elements: [] }))
+    );
 
     return () => { socket.disconnect(); };
   }, []);
@@ -80,12 +89,22 @@ export default function PanelClient() {
     window.setTimeout(() => root.classList.remove("theme-anim"), 450);
   }, []);
 
+  // локально применяем мгновенно; на сервер уходит не чаще ~8 раз/с (склейка правок)
+  const pendingUpdatesRef = useRef<Map<string, { partial: Partial<StreamElement>; timer: ReturnType<typeof setTimeout> }>>(new Map());
+
   const updateElement = useCallback((id: string, partial: Partial<StreamElement>) => {
     setState((p) => ({
       ...p,
       elements: p.elements.map((e) => (e.id === id ? { ...e, ...partial } : e)),
     }));
-    emit("element:update", { id, ...partial });
+    const pending = pendingUpdatesRef.current.get(id);
+    const merged = { ...(pending?.partial || {}), ...partial };
+    if (pending) clearTimeout(pending.timer);
+    const timer = setTimeout(() => {
+      pendingUpdatesRef.current.delete(id);
+      emit("element:update", { id, ...merged });
+    }, 120);
+    pendingUpdatesRef.current.set(id, { partial: merged, timer });
   }, [emit]);
 
   const addElement = useCallback(
@@ -119,6 +138,10 @@ export default function PanelClient() {
     setSelectedId(el.id);
   };
 
+  // оптимистично двигаем локально; на сервер шлём не чаще ~30 раз/с, финал — на mouseup
+  const moveThrottleRef = useRef(0);
+  const lastMoveRef = useRef<{ id: string; x: number; y: number } | null>(null);
+
   const handleMouseMove = useCallback(
     (e: MouseEvent) => {
       if (!dragRef.current || !viewportRef.current) return;
@@ -126,16 +149,31 @@ export default function PanelClient() {
       const rect = viewportRef.current.getBoundingClientRect();
       const lx = (e.clientX - rect.left - vx) / s;
       const ly = (e.clientY - rect.top - vy) / s;
-      emit("element:move", {
-        id: dragRef.current.id,
-        x: Math.round(lx - dragRef.current.offX),
-        y: Math.round(ly - dragRef.current.offY),
-      });
+      const x = Math.round(lx - dragRef.current.offX);
+      const y = Math.round(ly - dragRef.current.offY);
+      const id = dragRef.current.id;
+      setState((p) => ({
+        ...p,
+        elements: p.elements.map((el) => (el.id === id ? { ...el, x, y } : el)),
+      }));
+      lastMoveRef.current = { id, x, y };
+      const now = performance.now();
+      if (now - moveThrottleRef.current >= 33) {
+        moveThrottleRef.current = now;
+        emit("element:move", { id, x, y });
+      }
     },
     [emit]
   );
 
-  const handleMouseUp = useCallback(() => { dragRef.current = null; }, []);
+  const handleMouseUp = useCallback(() => {
+    dragRef.current = null;
+    if (lastMoveRef.current) {
+      moveThrottleRef.current = 0;
+      emit("element:move", lastMoveRef.current);
+      lastMoveRef.current = null;
+    }
+  }, [emit]);
 
   useEffect(() => {
     window.addEventListener("mousemove", handleMouseMove);
@@ -159,6 +197,8 @@ export default function PanelClient() {
   }, [selectedId, emit]);
 
   const resizeRef = useRef<{ id: string; dir: string; sx: number; sy: number; orig: StreamElement } | null>(null);
+  const resizeThrottleRef = useRef(0);
+  const lastResizeRef = useRef<{ id: string; x: number; y: number; width: number; height: number } | null>(null);
 
   const handleResizeStart = (e: React.MouseEvent, el: StreamElement, dir: string) => {
     e.preventDefault();
@@ -203,20 +243,36 @@ export default function PanelClient() {
         x = Math.round(orig.x + (dir.includes("w") ? orig.width - width : 0));
         y = Math.round(orig.y + (dir.includes("n") ? orig.height - height : 0));
       }
-      emit("element:resize", { id: orig.id, x, y, width, height });
+      setState((p) => ({
+        ...p,
+        elements: p.elements.map((el) => (el.id === orig.id ? { ...el, x, y, width, height } : el)),
+      }));
+      lastResizeRef.current = { id: orig.id, x, y, width, height };
+      const now = performance.now();
+      if (now - resizeThrottleRef.current >= 33) {
+        resizeThrottleRef.current = now;
+        emit("element:resize", { id: orig.id, x, y, width, height });
+      }
     },
     [emit]
   );
 
   useEffect(() => {
-    const fn = () => { resizeRef.current = null; };
+    const fn = () => {
+      resizeRef.current = null;
+      if (lastResizeRef.current) {
+        resizeThrottleRef.current = 0;
+        emit("element:resize", lastResizeRef.current);
+        lastResizeRef.current = null;
+      }
+    };
     window.addEventListener("mouseup", fn);
     window.addEventListener("mousemove", handleResizeMove);
     return () => {
       window.removeEventListener("mouseup", fn);
       window.removeEventListener("mousemove", handleResizeMove);
     };
-  }, [handleResizeMove]);
+  }, [handleResizeMove, emit]);
 
   useEffect(() => {
     const vp = viewportRef.current;
@@ -371,7 +427,14 @@ export default function PanelClient() {
               {state.elements.map((el) => (
                 <div key={el.id} onClick={() => setSelectedId(el.id)}
                   className={`flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer text-sm transition-colors ${selectedId === el.id ? "bg-accent text-white" : "hover:bg-border text-gray-300"}`}>
-                  <button onClick={(e) => { e.stopPropagation(); emit("element:toggle-visible", el.id); }} className="shrink-0">{el.visible ? "👁" : "🚫"}</button>
+                  <button onClick={(e) => {
+                    e.stopPropagation();
+                    setState((p) => ({
+                      ...p,
+                      elements: p.elements.map((x) => (x.id === el.id ? { ...x, visible: !x.visible } : x)),
+                    }));
+                    emit("element:toggle-visible", el.id);
+                  }} className="shrink-0">{el.visible ? "👁" : "🚫"}</button>
                   {el.alwaysLoaded && <span className="shrink-0 text-[10px] opacity-70" title="Всегда загружен">📦</span>}
                   <span className="flex-1 truncate">
                     {el.type === "image" && "🖼 " + (el.src?.slice(0, 20) || "image")}
