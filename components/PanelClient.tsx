@@ -13,6 +13,7 @@ export default function PanelClient() {
   const [state, setState] = useState<SyncState>({ elements: [], canvasW: CANVAS_W, canvasH: CANVAS_H });
   const [connected, setConnected] = useState(false);
   const [tab, setTab] = useState<"elements" | "obs">("elements");
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const [view, setView] = useState({ x: 0, y: 0, s: 0.3 });
@@ -62,6 +63,21 @@ export default function PanelClient() {
 
   const emit = useCallback((event: string, data?: any) => {
     socketRef.current?.emit(event, data);
+  }, []);
+
+  useEffect(() => {
+    setTheme(document.documentElement.classList.contains("light") ? "light" : "dark");
+  }, []);
+
+  const applyTheme = useCallback((next: "dark" | "light") => {
+    const root = document.documentElement;
+    const isLight = root.classList.contains("light");
+    if ((next === "light") === isLight) return;
+    setTheme(next);
+    root.classList.add("theme-anim");
+    root.classList.toggle("light", next === "light");
+    try { localStorage.setItem("theme", next); } catch {}
+    window.setTimeout(() => root.classList.remove("theme-anim"), 450);
   }, []);
 
   const updateElement = useCallback((id: string, partial: Partial<StreamElement>) => {
@@ -267,6 +283,12 @@ export default function PanelClient() {
         </div>
         <div className="flex-1" />
         <div className="flex items-center gap-3">
+          <button onClick={() => applyTheme(theme === "dark" ? "light" : "dark")}
+            title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
+            aria-label={theme === "dark" ? "Включить светлую тему" : "Включить тёмную тему"}
+            className={`w-9 h-9 rounded-full bg-border flex items-center justify-center transition-colors ${theme === "dark" ? "text-gray-300 hover:text-white" : "text-[#443f66] hover:text-[#3a3750]"}`}>
+            {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+          </button>
           <span className={`flex items-center gap-1.5 text-sm ${connected ? "text-green-400" : "text-red-400"}`}>
             <span className={`w-2 h-2 rounded-full ${connected ? "bg-green-400" : "bg-red-400"}`} />
             {connected ? "Сервер: онлайн" : "Сервер: оффлайн"}
@@ -278,11 +300,11 @@ export default function PanelClient() {
       <div className="flex gap-1 px-5 pt-3 bg-panel border-b border-border">
         <button
           onClick={() => setTab("elements")}
-          className={`px-4 py-2 text-sm rounded-t-lg transition-colors ${tab === "elements" ? "bg-bg text-white border-b-2 border-accent" : "text-gray-500 hover:text-gray-300"}`}
+          className={`px-4 py-2 text-sm rounded-t-lg transition-colors ${tab === "elements" ? "bg-bg text-[color:var(--c-on-bg)] border-b-2 border-accent" : "text-gray-500 hover:text-gray-300"}`}
         >Элементы оверлея</button>
         <button
           onClick={() => setTab("obs")}
-          className={`px-4 py-2 text-sm rounded-t-lg transition-colors ${tab === "obs" ? "bg-bg text-white border-b-2 border-accent" : "text-gray-500 hover:text-gray-300"}`}
+          className={`px-4 py-2 text-sm rounded-t-lg transition-colors ${tab === "obs" ? "bg-bg text-[color:var(--c-on-bg)] border-b-2 border-accent" : "text-gray-500 hover:text-gray-300"}`}
         >Управление OBS</button>
       </div>
 
@@ -374,8 +396,8 @@ export default function PanelClient() {
               ref={viewportRef}
               className={`flex-1 relative overflow-hidden ${panning ? "cursor-grabbing" : ""}`}
               style={{
-                background: "#0c0c15",
-                backgroundImage: "radial-gradient(#26263a 1px, transparent 1px)",
+                background: "var(--c-canvas)",
+                backgroundImage: "radial-gradient(var(--c-dot) 1px, transparent 1px)",
                 backgroundSize: `${Math.max(4, 22 * view.s)}px ${Math.max(4, 22 * view.s)}px`,
                 backgroundPosition: `${view.x}px ${view.y}px`,
               }}
@@ -405,14 +427,14 @@ export default function PanelClient() {
                       style={{
                         left: el.x, top: el.y, width: el.width, height: el.height,
                         zIndex: el.zIndex, opacity: el.visible ? (el.opacity ?? 1) : 0.35,
-                        outline: selectedId === el.id ? `${2 / view.s}px solid #a78bfa` : undefined,
+                        outline: selectedId === el.id ? `${2 / view.s}px solid rgb(var(--c-accent2))` : undefined,
                       }}>
                       <PreviewElement el={el} scale={1} />
                       {selectedId === el.id && (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => {
                         const cursors: Record<string, string> = { n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize", ne: "nesw-resize", sw: "nesw-resize", nw: "nwse-resize", se: "nwse-resize" };
                         const pos: React.CSSProperties = {
                           position: "absolute", width: hs, height: hs,
-                          background: "#a78bfa", border: `${2 / view.s}px solid #fff`,
+                          background: "rgb(var(--c-accent2))", border: `${2 / view.s}px solid #fff`,
                           borderRadius: 2, cursor: cursors[dir],
                         };
                         if (dir.includes("n")) pos.top = -hs / 2;
@@ -448,6 +470,26 @@ export default function PanelClient() {
         <ObsPanel />
       </div>
     </div>
+  );
+}
+
+function SunIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="5" />
+      <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+      <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    </svg>
   );
 }
 
@@ -534,10 +576,17 @@ function PropertyEditor({ el, update, emit }: { el: StreamElement; update: (part
       {(el.type === "image" || el.type === "video" || el.type === "gif" || el.type === "text") && (
         <div>
           <label className="text-xs text-gray-500 block mb-1">Прозрачность: {Math.round((el.opacity ?? 1) * 100)}%</label>
-          <input type="range" min={10} max={100} step={5} value={Math.round((el.opacity ?? 1) * 100)}
-            onChange={(e) => update({ opacity: Number(e.target.value) / 100 })}
-            className="w-full"
-            style={{ background: `linear-gradient(to right, #7c3aed ${Math.round((el.opacity ?? 1) * 100)}%, #2a2a38 ${Math.round((el.opacity ?? 1) * 100)}%)` }} />
+          {(() => {
+            // заливка заканчивается по центру кружка (кружок 14px) — не торчит на краях
+            const frac = ((Math.round((el.opacity ?? 1) * 100) - 10) / 90).toFixed(4);
+            const edge = `calc(7px + (100% - 14px) * ${frac})`;
+            return (
+              <input type="range" min={10} max={100} step={5} value={Math.round((el.opacity ?? 1) * 100)}
+                onChange={(e) => update({ opacity: Number(e.target.value) / 100 })}
+                className="w-full"
+                style={{ background: `linear-gradient(to right, rgb(var(--c-accent)) 0, rgb(var(--c-accent)) ${edge}, rgb(var(--c-border)) ${edge}, rgb(var(--c-border)) 100%)` }} />
+            );
+          })()}
         </div>
       )}
       {el.type === "text" && (

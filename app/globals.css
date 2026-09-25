@@ -2,18 +2,58 @@
 @tailwind components;
 @tailwind utilities;
 
-:root { color-scheme: dark; }
+/* Тёмная тема — значения по умолчанию (как было) */
+:root {
+  color-scheme: dark;
+  --c-bg: 15 15 20;          /* #0f0f14 */
+  --c-panel: 26 26 36;       /* #1a1a24 */
+  --c-accent: 124 58 237;    /* #7c3aed */
+  --c-accent-hover: 109 40 217; /* #6d28d9 */
+  --c-accent2: 167 139 250;  /* #a78bfa */
+  --c-border: 42 42 56;      /* #2a2a38 */
+  --c-on-bg: 255 255 255;    /* текст на подложке bg */
+  --c-text: #e5e7eb;
+  --c-canvas: #0c0c15;       /* фон рабочей зоны вокруг экрана */
+  --c-dot: #26263a;          /* точки рабочей зоны */
+  --c-sb-track: #14141c;
+  --c-sb-thumb: #2a2a38;
+  --c-sb-thumb-hover: #3a3a4a;
+}
+
+/* Светлая тема — приглушённая лавандовая палитра без пересвета */
+html.light {
+  color-scheme: light;
+  --c-bg: 222 219 232;       /* #dedbe8 */
+  --c-panel: 233 231 241;    /* #e9e7f1 */
+  --c-accent: 139 118 221;   /* #8b76dd */
+  --c-accent-hover: 122 101 209; /* #7a65d1 */
+  --c-accent2: 103 74 193;   /* #674ac1 */
+  --c-border: 200 195 218;   /* #c8c3da */
+  --c-on-bg: 63 58 96;       /* #3f3a60 */
+  --c-text: #38354e;
+  --c-canvas: 214 211 226;   /* #d6d3e2 */
+  --c-dot: #beb9d3;
+  --c-sb-track: #d6d3e4;
+  --c-sb-thumb: #c0bbd5;
+  --c-sb-thumb-hover: #aea9cd;
+}
+
 * { box-sizing: border-box; }
+/* Плавное переключение темы: класс вешается на <html> только на время анимации */
+html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
+  transition: background-color .35s ease, color .35s ease, border-color .35s ease,
+    fill .35s ease, stroke .35s ease, box-shadow .35s ease, opacity .35s ease !important;
+}
 body {
   margin: 0;
   background: transparent;
-  color: #e5e7eb;
+  color: var(--c-text);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: #14141c; }
-::-webkit-scrollbar-thumb { background: #2a2a38; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
+::-webkit-scrollbar-track { background: var(--c-sb-track); }
+::-webkit-scrollbar-thumb { background: var(--c-sb-thumb); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--c-sb-thumb-hover); }
 .dragging { cursor: grabbing !important; user-select: none; }
 .handle { cursor: nwse-resize; }
 input[type="range"] {
@@ -31,7 +71,7 @@ input[type="range"]::-webkit-slider-thumb {
   height: 14px;
   border-radius: 50%;
   background: #fff;
-  border: 2px solid #7c3aed;
+  border: 2px solid rgb(var(--c-accent));
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
   cursor: grab;
 }
@@ -41,6 +81,24 @@ input[type="range"]::-moz-range-thumb {
   height: 14px;
   border-radius: 50%;
   background: #fff;
-  border: 2px solid #7c3aed;
+  border: 2px solid rgb(var(--c-accent));
   cursor: grab;
 }
+
+/* Светлая тема: приглушаем серые оттенки, оставляя тёмную тему без изменений */
+html.light .text-gray-300 { color: #4b4763; }
+html.light .hover\:text-gray-300:hover { color: #4b4763; }
+html.light .text-gray-400 { color: #6b6785; }
+html.light .text-gray-500 { color: #8a86a3; }
+html.light .text-gray-600 { color: #a5a1bd; }
+html.light .bg-gray-600 { background: #c9c5dd; }
+html.light .hover\:bg-gray-600:hover { background: #dcd8ec; }
+html.light .hover\:text-white:hover { color: #3a3750; }
+html.light .hover\:bg-violet-700:hover { background: rgb(var(--c-accent-hover)); }
+html.light .bg-border.text-white { color: #443f66; }
+html.light .text-green-400 { color: #15803d; }
+html.light .bg-green-400 { background: #22c55e; }
+html.light .text-red-400 { color: #dc2626; }
+html.light .bg-red-400 { background: #ef4444; }
+html.light .hover\:bg-red-950\/40:hover { background: rgba(248, 113, 113, 0.15); }
+html.light .border-red-900\/50 { border-color: rgba(220, 38, 38, 0.3); }
