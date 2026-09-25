@@ -132,7 +132,7 @@ function OverlayElement({ el }: { el: StreamElement }) {
 				<img
 					src={el.src}
 					alt=''
-					style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+					style={{ width: '100%', height: '100%', objectFit: 'fill' }}
 					draggable={false}
 				/>
 			</div>
@@ -142,7 +142,7 @@ function OverlayElement({ el }: { el: StreamElement }) {
 			<div style={style}>
 				<video
 					src={el.src}
-					style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+					style={{ width: '100%', height: '100%', objectFit: 'fill' }}
 					autoPlay
 					loop
 					muted

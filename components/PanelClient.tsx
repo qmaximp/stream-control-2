@@ -8,7 +8,6 @@ import ObsPanel from "@/components/ObsPanel";
 
 const CANVAS_W = 1920;
 const CANVAS_H = 1080;
-const BUFFER = 600;
 
 export default function PanelClient() {
   const [state, setState] = useState<SyncState>({ elements: [], canvasW: CANVAS_W, canvasH: CANVAS_H });
@@ -16,6 +15,13 @@ export default function PanelClient() {
   const [tab, setTab] = useState<"elements" | "obs">("elements");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
+  const [view, setView] = useState({ x: 0, y: 0, s: 0.3 });
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const [panning, setPanning] = useState(false);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const panRef = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
+  const baseViewRef = useRef<{ x: number; y: number; s: number } | null>(null);
 
   useEffect(() => {
     const socket = ioInit({ transports: ["websocket", "polling"] });
@@ -58,6 +64,14 @@ export default function PanelClient() {
     socketRef.current?.emit(event, data);
   }, []);
 
+  const updateElement = useCallback((id: string, partial: Partial<StreamElement>) => {
+    setState((p) => ({
+      ...p,
+      elements: p.elements.map((e) => (e.id === id ? { ...e, ...partial } : e)),
+    }));
+    emit("element:update", { id, ...partial });
+  }, [emit]);
+
   const addElement = useCallback(
     (el: Omit<StreamElement, "id" | "zIndex" | "visible">) => {
       emit("element:add", { ...el, visible: true });
@@ -75,43 +89,34 @@ export default function PanelClient() {
 
   const selected = state.elements.find((e) => e.id === selectedId) || null;
 
-  const parkingSpot = (w: number) => {
-    const idx = state.elements.filter((e) => e.x + e.width <= 0).length;
-    return { x: -(w + 40), y: -BUFFER + 40 + (idx % 20) * 140 };
-  };
+  const parkingSpot = () => ({ x: -400, y: -400 });
 
   const dragRef = useRef<{ id: string; offX: number; offY: number } | null>(null);
-  const previewRef = useRef<HTMLDivElement>(null);
-
-  const getScale = () => {
-    if (!previewRef.current) return 1;
-    const w = previewRef.current.clientWidth;
-    const h = previewRef.current.clientHeight;
-    return Math.min(w / (state.canvasW + BUFFER * 2), h / (state.canvasH + BUFFER * 2));
-  };
 
   const handleDragStart = (e: React.MouseEvent, el: StreamElement) => {
     e.preventDefault();
-    const scale = getScale();
-    const rect = previewRef.current!.getBoundingClientRect();
-    const px = (e.clientX - rect.left) / scale - BUFFER;
-    const py = (e.clientY - rect.top) / scale - BUFFER;
-    dragRef.current = { id: el.id, offX: px - el.x, offY: py - el.y };
+    const { x: vx, y: vy, s } = viewRef.current;
+    const rect = viewportRef.current!.getBoundingClientRect();
+    const lx = (e.clientX - rect.left - vx) / s;
+    const ly = (e.clientY - rect.top - vy) / s;
+    dragRef.current = { id: el.id, offX: lx - el.x, offY: ly - el.y };
     setSelectedId(el.id);
   };
 
   const handleMouseMove = useCallback(
     (e: MouseEvent) => {
-      if (!dragRef.current) return;
-      const scale = getScale();
-      const rect = previewRef.current!.getBoundingClientRect();
-      const px = (e.clientX - rect.left) / scale - BUFFER;
-      const py = (e.clientY - rect.top) / scale - BUFFER;
-      const x = Math.min(state.canvasW + BUFFER - 40, Math.max(-BUFFER, Math.round(px - dragRef.current.offX)));
-      const y = Math.min(state.canvasH + BUFFER - 40, Math.max(-BUFFER, Math.round(py - dragRef.current.offY)));
-      emit("element:move", { id: dragRef.current.id, x, y });
+      if (!dragRef.current || !viewportRef.current) return;
+      const { x: vx, y: vy, s } = viewRef.current;
+      const rect = viewportRef.current.getBoundingClientRect();
+      const lx = (e.clientX - rect.left - vx) / s;
+      const ly = (e.clientY - rect.top - vy) / s;
+      emit("element:move", {
+        id: dragRef.current.id,
+        x: Math.round(lx - dragRef.current.offX),
+        y: Math.round(ly - dragRef.current.offY),
+      });
     },
-    [emit, state.canvasW, state.canvasH]
+    [emit]
   );
 
   const handleMouseUp = useCallback(() => { dragRef.current = null; }, []);
@@ -125,41 +130,66 @@ export default function PanelClient() {
     };
   }, [handleMouseMove, handleMouseUp]);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Delete" || !selectedId) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      emit("element:delete", selectedId);
+      setSelectedId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedId, emit]);
+
   const resizeRef = useRef<{ id: string; dir: string; sx: number; sy: number; orig: StreamElement } | null>(null);
 
   const handleResizeStart = (e: React.MouseEvent, el: StreamElement, dir: string) => {
     e.preventDefault();
     e.stopPropagation();
-    const scale = getScale();
-    const rect = previewRef.current!.getBoundingClientRect();
     resizeRef.current = {
       id: el.id, dir,
-      sx: (e.clientX - rect.left) / scale,
-      sy: (e.clientY - rect.top) / scale,
+      sx: e.clientX, sy: e.clientY,
       orig: { ...el },
     };
   };
 
   const handleResizeMove = useCallback(
     (e: MouseEvent) => {
-      if (!resizeRef.current) return;
-      const scale = getScale();
-      const rect = previewRef.current!.getBoundingClientRect();
+      if (!resizeRef.current || !viewportRef.current) return;
       const { dir, orig } = resizeRef.current;
-      const dx = (e.clientX - rect.left) / scale - resizeRef.current.sx;
-      const dy = (e.clientY - rect.top) / scale - resizeRef.current.sy;
-      let { x, y, width, height } = orig;
-      if (dir.includes("e")) width = orig.width + dx;
-      if (dir.includes("w")) { width = orig.width - dx; x = orig.x + dx; }
-      if (dir.includes("s")) height = orig.height + dy;
-      if (dir.includes("n")) { height = orig.height - dy; y = orig.y + dy; }
-      width = Math.max(30, Math.min(state.canvasW + BUFFER * 2, Math.round(width)));
-      height = Math.max(20, Math.min(state.canvasH + BUFFER * 2, Math.round(height)));
-      x = Math.min(state.canvasW + BUFFER - 40, Math.max(-BUFFER, Math.round(x)));
-      y = Math.min(state.canvasH + BUFFER - 40, Math.max(-BUFFER, Math.round(y)));
+      const { x: vx, y: vy, s } = viewRef.current;
+      const rect = viewportRef.current.getBoundingClientRect();
+      const lx = (e.clientX - rect.left - vx) / s;
+      const ly = (e.clientY - rect.top - vy) / s;
+      let width, height, x, y;
+      if (dir.length === 2 && e.shiftKey) {
+        const ox = dir.includes("w") ? orig.x + orig.width : orig.x;
+        const oy = dir.includes("n") ? orig.y + orig.height : orig.y;
+        const k = Math.max(
+          Math.abs(lx - ox) / Math.max(orig.width, 1),
+          Math.abs(ly - oy) / Math.max(orig.height, 1)
+        );
+        width = Math.max(30, Math.round(orig.width * k));
+        height = Math.max(20, Math.round(orig.height * k));
+        x = Math.round(dir.includes("w") ? ox - width : orig.x);
+        y = Math.round(dir.includes("n") ? oy - height : orig.y);
+      } else {
+        const dx = (e.clientX - resizeRef.current.sx) / s;
+        const dy = (e.clientY - resizeRef.current.sy) / s;
+        let dw = 0, dh = 0;
+        if (dir.includes("e")) dw = dx;
+        if (dir.includes("w")) dw = -dx;
+        if (dir.includes("s")) dh = dy;
+        if (dir.includes("n")) dh = -dy;
+        width = Math.max(30, Math.round(orig.width + dw));
+        height = Math.max(20, Math.round(orig.height + dh));
+        x = Math.round(orig.x + (dir.includes("w") ? orig.width - width : 0));
+        y = Math.round(orig.y + (dir.includes("n") ? orig.height - height : 0));
+      }
       emit("element:resize", { id: orig.id, x, y, width, height });
     },
-    [emit, state.canvasW, state.canvasH]
+    [emit]
   );
 
   useEffect(() => {
@@ -171,6 +201,59 @@ export default function PanelClient() {
       window.removeEventListener("mousemove", handleResizeMove);
     };
   }, [handleResizeMove]);
+
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp || baseViewRef.current) return;
+    const s = Math.min((vp.clientWidth - 80) / state.canvasW, (vp.clientHeight - 80) / state.canvasH);
+    const base = { s, x: (vp.clientWidth - state.canvasW * s) / 2, y: (vp.clientHeight - state.canvasH * s) / 2 };
+    baseViewRef.current = base;
+    setView(base);
+  }, [state.canvasW, state.canvasH]);
+
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      const { x, y, s } = viewRef.current;
+      const ns = Math.min(200, Math.max(0.001, s * factor));
+      if (ns === s) return;
+      const rect = vp.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      setView({ s: ns, x: mx - ((mx - x) / s) * ns, y: my - ((my - y) / s) * ns });
+    };
+    vp.addEventListener("wheel", onWheel, { passive: false });
+    return () => vp.removeEventListener("wheel", onWheel);
+  }, []);
+
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const down = (e: MouseEvent) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      e.stopPropagation();
+      panRef.current = { x: e.clientX, y: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
+      setPanning(true);
+    };
+    const move = (e: MouseEvent) => {
+      const p = panRef.current;
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      setView((v) => ({ ...v, x: p.vx + dx, y: p.vy + dy }));
+    };
+    const up = () => { panRef.current = null; setPanning(false); };
+    vp.addEventListener("mousedown", down);
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+    return () => {
+      vp.removeEventListener("mousedown", down);
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+  }, []);
 
   return (
     <div className="min-h-screen flex flex-col bg-bg">
@@ -203,8 +286,7 @@ export default function PanelClient() {
         >Управление OBS</button>
       </div>
 
-      {tab === "elements" ? (
-        <div className="flex-1 flex overflow-hidden">
+      <div className={`flex-1 flex overflow-hidden ${tab === "elements" ? "" : "hidden"}`}>
           <aside className="w-72 shrink-0 bg-panel border-r border-border p-4 overflow-y-auto">
             <h2 className="text-sm font-semibold mb-3 text-gray-400 uppercase tracking-wide">Добавить элемент</h2>
             <div className="space-y-2">
@@ -215,14 +297,14 @@ export default function PanelClient() {
                   input.onchange = async () => {
                     const f = input.files?.[0]; if (!f) return;
                     const dataUrl = await fileToDataUrl(f);
-                    const p = parkingSpot(400);
+                    const p = parkingSpot();
                     addElement({ type: "image", src: dataUrl, ...p, width: 400, height: 225, text: "" });
                   };
                   input.click();
                 }} className="flex-1 px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🖼 С ПК</button>
                 <button onClick={() => {
                   const url = prompt("Ссылка на картинку:");
-                  const p = parkingSpot(400);
+                  const p = parkingSpot();
                   if (url) addElement({ type: "image", src: url, ...p, width: 400, height: 225, text: "" });
                 }} className="flex-1 px-3 py-2 bg-border hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">🔗 URL</button>
               </div>
@@ -234,29 +316,29 @@ export default function PanelClient() {
                     const f = input.files?.[0]; if (!f) return;
                     if (f.size > 40 * 1024 * 1024) { alert("Файл больше 40 МБ. Лучше использовать ссылку."); return; }
                     const dataUrl = await fileToDataUrl(f);
-                    const p = parkingSpot(480);
+                    const p = parkingSpot();
                     addElement({ type: "video", src: dataUrl, ...p, width: 480, height: 270, text: "" });
                   };
                   input.click();
                 }} className="flex-1 px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🎬 С ПК</button>
                 <button onClick={() => {
                   const url = prompt("Ссылка на видео (MP4, WebM):");
-                  const p = parkingSpot(480);
+                  const p = parkingSpot();
                   if (url) addElement({ type: "video", src: url, ...p, width: 480, height: 270, text: "" });
                 }} className="flex-1 px-3 py-2 bg-border hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">🔗 URL</button>
               </div>
               <button onClick={() => {
-                const p = parkingSpot(560);
+                const p = parkingSpot();
                 const url = prompt("Ссылка на сайт или YouTube (например, https://youtube.com/watch?v=...):");
                 if (url) addElement({ type: "iframe", src: url, ...p, width: 560, height: 315, text: "" });
               }} className="w-full px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🌐 Сайт / YouTube</button>
               <button onClick={() => {
-                const p = parkingSpot(300);
+                const p = parkingSpot();
                 addElement({ type: "text", ...p, width: 300, height: 60, text: "Новый текст", fontSize: 36, color: "#ffffff", fontWeight: "bold", bgColor: "transparent" });
               }}
                 className="w-full px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">✏️ Текст</button>
               <button onClick={() => {
-                const p = parkingSpot(200);
+                const p = parkingSpot();
                 addElement({ type: "timer", ...p, width: 200, height: 60, text: "", duration: 300, timerDirection: "down", fontSize: 40, color: "#ffffff", fontWeight: "bold", bgColor: "transparent", startTime: null, isRunning: false, timerLabel: "" });
               }}
                 className="w-full px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">⏱ Таймер</button>
@@ -288,41 +370,57 @@ export default function PanelClient() {
           </aside>
 
           <div className="flex-1 flex flex-col bg-bg overflow-hidden">
-            <div className="flex-1 flex items-center justify-center p-6 overflow-hidden">
-              <div ref={previewRef} className="relative rounded-lg overflow-hidden shadow-2xl"
-                style={{
-                  width: "100%", height: "100%", maxWidth: "100%",
-                  aspectRatio: `${state.canvasW + BUFFER * 2} / ${state.canvasH + BUFFER * 2}`,
-                  background: "#0c0c15",
-                  backgroundImage: "radial-gradient(#26263a 1px, transparent 1px)",
-                  backgroundSize: "22px 22px",
-                }}
-                onClick={(e) => { if (e.target === e.currentTarget) setSelectedId(null); }}>
-                <span className="absolute inset-x-0 text-center text-[10px] tracking-widest text-gray-600 uppercase pointer-events-none" style={{ top: 10 }}>element preload area</span>
-                <span className="absolute inset-x-0 text-center text-[10px] tracking-widest text-gray-600 uppercase pointer-events-none" style={{ bottom: 10 }}>element preload area</span>
-                <span className="absolute text-[10px] tracking-widest text-gray-600 uppercase pointer-events-none" style={{ left: 8, top: "50%", transform: "translateY(-50%)", writingMode: "vertical-rl" }}>element preload area</span>
-                <span className="absolute text-[10px] tracking-widest text-gray-600 uppercase pointer-events-none" style={{ right: 8, top: "50%", transform: "translateY(-50%)", writingMode: "vertical-rl" }}>element preload area</span>
+            <div
+              ref={viewportRef}
+              className={`flex-1 relative overflow-hidden ${panning ? "cursor-grabbing" : ""}`}
+              style={{
+                background: "#0c0c15",
+                backgroundImage: "radial-gradient(#26263a 1px, transparent 1px)",
+                backgroundSize: `${Math.max(4, 22 * view.s)}px ${Math.max(4, 22 * view.s)}px`,
+                backgroundPosition: `${view.x}px ${view.y}px`,
+              }}
+              onClick={(e) => { if (e.target === e.currentTarget) setSelectedId(null); }}
+            >
+              <div className="absolute left-0 top-0"
+                style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`, transformOrigin: "0 0" }}>
                 <div className="absolute bg-black border border-border rounded-md pointer-events-none"
-                  style={{ left: BUFFER * getScale(), top: BUFFER * getScale(), width: state.canvasW * getScale(), height: state.canvasH * getScale() }}>
+                  style={{ left: 0, top: 0, width: state.canvasW, height: state.canvasH }}>
                   <div className="absolute inset-0 opacity-10" style={{ backgroundImage: "linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)", backgroundSize: "40px 40px" }} />
-                  <span className="absolute bottom-1 right-2 text-[9px] text-gray-600">экран {state.canvasW} × {state.canvasH}</span>
+                  <span className="absolute text-gray-600 pointer-events-none"
+                    style={{ bottom: 8, right: 16, fontSize: 20 }}>экран {state.canvasW} × {state.canvasH}</span>
                 </div>
+                <span className="absolute text-center tracking-widest text-gray-600 uppercase pointer-events-none"
+                  style={{ left: 0, top: -175, width: state.canvasW, fontSize: 28 }}>зона предзагрузки элементов</span>
+                <span className="absolute text-center tracking-widest text-gray-600 uppercase pointer-events-none"
+                  style={{ left: 0, top: state.canvasH + 175, width: state.canvasW, fontSize: 28 }}>зона предзагрузки элементов</span>
+                <span className="absolute tracking-widest text-gray-600 uppercase pointer-events-none"
+                  style={{ left: -175, top: 0, height: state.canvasH, writingMode: "vertical-rl", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28 }}>зона предзагрузки элементов</span>
+                <span className="absolute tracking-widest text-gray-600 uppercase pointer-events-none"
+                  style={{ left: state.canvasW + 175, top: 0, height: state.canvasH, writingMode: "vertical-rl", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28 }}>зона предзагрузки элементов</span>
                 {state.elements.map((el) => {
-                  const scale = getScale();
+                  const hs = 10 / view.s;
                   return (
                     <div key={el.id} onMouseDown={(e) => handleDragStart(e, el)}
-                      className={`absolute select-none cursor-grab ${selectedId === el.id ? "ring-2 ring-accent2" : ""}`}
-                      style={{ left: (BUFFER + el.x) * scale, top: (BUFFER + el.y) * scale, width: el.width * scale, height: el.height * scale, zIndex: el.zIndex, opacity: el.visible ? (el.opacity ?? 1) : 0.35 }}>
-                      <PreviewElement el={el} scale={scale} />
+                      className="absolute select-none cursor-grab"
+                      style={{
+                        left: el.x, top: el.y, width: el.width, height: el.height,
+                        zIndex: el.zIndex, opacity: el.visible ? (el.opacity ?? 1) : 0.35,
+                        outline: selectedId === el.id ? `${2 / view.s}px solid #a78bfa` : undefined,
+                      }}>
+                      <PreviewElement el={el} scale={1} />
                       {selectedId === el.id && (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => {
                         const cursors: Record<string, string> = { n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize", ne: "nesw-resize", sw: "nesw-resize", nw: "nwse-resize", se: "nwse-resize" };
-                        const pos: React.CSSProperties = { position: "absolute", width: 10, height: 10, background: "#a78bfa", border: "2px solid #fff", borderRadius: 2, cursor: cursors[dir] };
-                        if (dir.includes("n")) pos.top = -5;
-                        if (dir.includes("s")) pos.bottom = -5;
-                        if (dir.includes("e")) pos.right = -5;
-                        if (dir.includes("w")) pos.left = -5;
-                        if (dir === "n" || dir === "s") { pos.left = "50%"; pos.marginLeft = -5; }
-                        if (dir === "e" || dir === "w") { pos.top = "50%"; pos.marginTop = -5; }
+                        const pos: React.CSSProperties = {
+                          position: "absolute", width: hs, height: hs,
+                          background: "#a78bfa", border: `${2 / view.s}px solid #fff`,
+                          borderRadius: 2, cursor: cursors[dir],
+                        };
+                        if (dir.includes("n")) pos.top = -hs / 2;
+                        if (dir.includes("s")) pos.bottom = -hs / 2;
+                        if (dir.includes("e")) pos.right = -hs / 2;
+                        if (dir.includes("w")) pos.left = -hs / 2;
+                        if (dir === "n" || dir === "s") { pos.left = "50%"; pos.marginLeft = -hs / 2; }
+                        if (dir === "e" || dir === "w") { pos.top = "50%"; pos.marginTop = -hs / 2; }
                         return (
                           <div key={dir} onMouseDown={(e) => handleResizeStart(e, el, dir)} className="handle" style={pos} />
                         );
@@ -332,37 +430,43 @@ export default function PanelClient() {
                 })}
               </div>
             </div>
+            <div className="shrink-0 flex items-center gap-2 px-6 pb-3">
+              <span className="bg-panel border border-border rounded px-2 py-1 text-[10px] text-gray-400">🔍 {Math.round((view.s / (baseViewRef.current?.s ?? view.s)) * 100)}%</span>
+              <button onClick={() => { if (baseViewRef.current) setView(baseViewRef.current); }}
+                className="bg-panel border border-border rounded px-2 py-1 text-[10px] text-gray-400 hover:text-white transition-colors">Сбросить</button>
+              <span className="bg-panel border border-border rounded px-2 py-1 text-[10px] text-gray-500">колесо — зум · зажатое колесо — панорама</span>
+            </div>
           </div>
 
           <aside className="w-72 shrink-0 bg-panel border-l border-border p-4 overflow-y-auto">
-            {selected ? <PropertyEditor el={selected} emit={emit} /> : (
+            {selected ? <PropertyEditor el={selected} update={(partial) => updateElement(selected.id, partial)} emit={emit} /> : (
               <div className="text-sm text-gray-600 mt-4 text-center">Выберите элемент, чтобы изменить его свойства.</div>
             )}
           </aside>
         </div>
-      ) : (
-        <div className="flex-1 overflow-auto"><ObsPanel /></div>
-      )}
+      <div className={`flex-1 overflow-auto ${tab === "obs" ? "" : "hidden"}`}>
+        <ObsPanel />
+      </div>
     </div>
   );
 }
 
 function PreviewElement({ el, scale }: { el: StreamElement; scale: number }) {
-  if (el.type === "image" || el.type === "gif") return <img src={el.src} alt="" className="w-full h-full object-contain pointer-events-none" draggable={false} />;
+  if (el.type === "image" || el.type === "gif") return <img src={el.src} alt="" className="w-full h-full object-fill pointer-events-none" draggable={false} />;
   if (el.type === "iframe")
     return (
       <iframe src={toEmbedUrl(el.src || "")} title="embed"
         className="w-full h-full pointer-events-none" style={{ border: 0 }}
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen />
     );
-  if (el.type === "video") return <video src={el.src} className="w-full h-full object-contain pointer-events-none" muted loop autoPlay playsInline />;
+  if (el.type === "video") return <video src={el.src} className="w-full h-full object-fill pointer-events-none" muted loop autoPlay playsInline />;
   if (el.type === "text") return (
     <div className="w-full h-full flex items-center justify-center pointer-events-none overflow-hidden"
       style={{ fontSize: (el.fontSize || 24) * scale, color: el.color || "#fff", fontWeight: el.fontWeight || "normal", background: el.bgColor === "transparent" ? "none" : el.bgColor, textAlign: "center" }}>
       {el.text}
     </div>
   );
-  if (el.type === "timer") return <TimerPreview el={el} scale={scale} />;
+  if (el.type === "timer") return <TimerPreview el={el} scale={1} />;
   return null;
 }
 
@@ -402,8 +506,7 @@ function formatTime(seconds: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
-function PropertyEditor({ el, emit }: { el: StreamElement; emit: (e: string, d?: any) => void }) {
-  const update = (partial: Partial<StreamElement>) => emit("element:update", { id: el.id, ...partial });
+function PropertyEditor({ el, update, emit }: { el: StreamElement; update: (partial: Partial<StreamElement>) => void; emit: (e: string, d?: any) => void }) {
   return (
     <div className="space-y-4">
       <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide">Свойства: {el.type}</h2>
@@ -424,15 +527,17 @@ function PropertyEditor({ el, emit }: { el: StreamElement; emit: (e: string, d?:
         </div>
         <button onClick={() => update({ alwaysLoaded: !el.alwaysLoaded })}
           className={`w-9 h-5 rounded-full transition-colors shrink-0 relative ${el.alwaysLoaded ? "bg-green-500" : "bg-gray-600"}`}>
-          <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${el.alwaysLoaded ? "translate-x-4" : "translate-x-0.5"}`} />
+          <span className="absolute top-[2px] w-4 h-4 bg-white rounded-full transition-all"
+            style={{ left: el.alwaysLoaded ? 18 : 2 }} />
         </button>
       </div>
       {(el.type === "image" || el.type === "video" || el.type === "gif" || el.type === "text") && (
         <div>
           <label className="text-xs text-gray-500 block mb-1">Прозрачность: {Math.round((el.opacity ?? 1) * 100)}%</label>
-          <input type="range" min={10} max={100} value={Math.round((el.opacity ?? 1) * 100)}
+          <input type="range" min={10} max={100} step={5} value={Math.round((el.opacity ?? 1) * 100)}
             onChange={(e) => update({ opacity: Number(e.target.value) / 100 })}
-            className="w-full accent-violet-500 cursor-pointer" />
+            className="w-full"
+            style={{ background: `linear-gradient(to right, #7c3aed ${Math.round((el.opacity ?? 1) * 100)}%, #2a2a38 ${Math.round((el.opacity ?? 1) * 100)}%)` }} />
         </div>
       )}
       {el.type === "text" && (

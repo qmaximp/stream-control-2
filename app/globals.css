@@ -16,3 +16,31 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
 .dragging { cursor: grabbing !important; user-select: none; }
 .handle { cursor: nwse-resize; }
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid #7c3aed;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  cursor: grab;
+}
+input[type="range"]::-webkit-slider-thumb:active { cursor: grabbing; }
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid #7c3aed;
+  cursor: grab;
+}

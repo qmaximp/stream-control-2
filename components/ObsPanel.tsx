@@ -25,7 +25,7 @@ export default function ObsPanel() {
       const allItems: ObsSceneItem[] = [];
       for (const item of res.sceneItems as any[]) {
         const sceneItem: ObsSceneItem = {
-          itemId: item.itemId, sourceName: item.sourceName,
+          itemId: item.sceneItemId, sourceName: item.sourceName,
           sourceType: item.inputKind || item.sourceKind || "unknown",
           sceneName, visible: item.sceneItemEnabled, isGroup: item.isGroup, children: [],
         };
@@ -33,7 +33,7 @@ export default function ObsPanel() {
           try {
             const groupRes = await obs.call("GetGroupSceneItemList", { sceneName: item.sourceName });
             sceneItem.children = (groupRes.sceneItems as any[]).map((child) => ({
-              itemId: child.itemId, sourceName: child.sourceName,
+              itemId: child.sceneItemId, sourceName: child.sourceName,
               sourceType: child.inputKind || child.sourceKind || "unknown",
               sceneName: item.sourceName, visible: child.sceneItemEnabled,
               isGroup: false, groupName: item.sourceName,
@@ -103,7 +103,7 @@ export default function ObsPanel() {
     try {
       const res = await obs.call("GetSceneItemList", { sceneName: item.sceneName });
       const allItems = res.sceneItems as any[];
-      const idx = allItems.findIndex((i: any) => i.itemId === item.itemId);
+      const idx = allItems.findIndex((i: any) => i.sceneItemId === item.itemId);
       if (idx < 0) return;
       const newIndex = direction === "up" ? Math.max(0, idx - 1) : Math.min(allItems.length - 1, idx + 1);
       if (newIndex === idx) return;
@@ -171,7 +171,8 @@ export default function ObsPanel() {
                   <div className="flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-border/50">
                     <button onClick={() => toggleItem(item)}
                       className={`w-9 h-5 rounded-full transition-colors shrink-0 relative ${item.visible ? "bg-green-500" : "bg-gray-600"}`}>
-                      <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${item.visible ? "translate-x-4" : "translate-x-0.5"}`} />
+                      <span className="absolute top-[2px] w-4 h-4 bg-white rounded-full transition-all"
+                        style={{ left: item.visible ? 18 : 2 }} />
                     </button>
                     <span className="flex-1 text-sm truncate">{item.sourceName}</span>
                     <span className="text-xs text-gray-500 hidden sm:inline">{item.sourceType}</span>
@@ -191,7 +192,8 @@ export default function ObsPanel() {
                         <div key={child.itemId + "-" + child.sourceName} className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-border/50">
                           <button onClick={() => toggleItem(child)}
                             className={`w-9 h-5 rounded-full transition-colors shrink-0 relative ${child.visible ? "bg-green-500" : "bg-gray-600"}`}>
-                            <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full transition-transform ${child.visible ? "translate-x-4" : "translate-x-0.5"}`} />
+                            <span className="absolute top-[2px] w-4 h-4 bg-white rounded-full transition-all"
+                              style={{ left: child.visible ? 18 : 2 }} />
                           </button>
                           <span className="flex-1 text-sm truncate">{child.sourceName}</span>
                           <span className="text-xs text-gray-600">📁 {child.groupName}</span>
