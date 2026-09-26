@@ -22,6 +22,8 @@ export interface StreamElement {
   timerLabel?: string;
   visible: boolean;
   alwaysLoaded?: boolean;
+  locked?: boolean;
+  autoplay?: boolean;
   zIndex: number;
 }
 

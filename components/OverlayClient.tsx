@@ -1,9 +1,15 @@
 'use client'
 
 import type { StreamElement, SyncState } from '@/lib/types'
-import { toEmbedUrl } from '@/lib/embed'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { toEmbedUrl, withAutoplay } from '@/lib/embed'
+import { playFinishSound } from '@/lib/sound'
 import { io as ioInit } from 'socket.io-client'
+
+// iframe-плееры по id элемента: сюда приходят команды из панели
+const iframeRefs = new Map<string, HTMLIFrameElement>()
+const playerTimes = new Map<string, { t: number; st: number }>()
+const seekTargets = new Map<string, number>()
 
 export default function OverlayClient() {
 	const [state, setState] = useState<SyncState>({
@@ -54,12 +60,51 @@ export default function OverlayClient() {
 			}),
 		)
 		socket.on('elements:cleared', () => setState(p => ({ ...p, elements: [] })))
+		// команды плееру из панели (пуск/пауза/громкость) — через YouTube postMessage API
+		socket.on('element:command', ({ id, cmd, value }: { id: string; cmd: string; value?: number }) => {
+			if (cmd === 'time') {
+				// целевая позиция из превью — оверлей подтянется при дрейфе
+				seekTargets.set(id, value ?? 0)
+				return
+			}
+			const f = iframeRefs.get(id)
+			if (f?.contentWindow) {
+				f.contentWindow.postMessage(JSON.stringify({ event: 'command', func: cmd, args: value !== undefined ? [value] : [] }), '*')
+			}
+		})
 		socket.on('canvas:resize', (dims: { w: number; h: number }) =>
 			setState(p => ({ ...p, canvasW: dims.w, canvasH: dims.h })),
 		)
 		return () => {
 			socket.disconnect()
 		}
+	}, [])
+
+	// отчёты своих плееров: позиция/состояние; при дрейфе от превью > 2с — перемотка
+	useEffect(() => {
+		const onMsg = (e: MessageEvent) => {
+			let id: string | null = null
+			for (const [key, f] of iframeRefs) if (f.contentWindow === e.source) { id = key; break }
+			if (!id) return
+			try {
+				const d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data
+				if (!d || d.event !== 'infoDelivery' || !d.info) return
+				const t = d.info.currentTime ?? playerTimes.get(id)?.t
+				const st = d.info.playerState ?? playerTimes.get(id)?.st ?? 0
+				if (t !== undefined) playerTimes.set(id, { t, st })
+				const target = seekTargets.get(id)
+				if (t !== undefined && target !== undefined && st === 1 && Math.abs(t - target) > 2) {
+					iframeRefs.get(id)?.contentWindow?.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [target, true] }), '*')
+				}
+			} catch {}
+		}
+		window.addEventListener('message', onMsg)
+		const hs = setInterval(() => {
+			for (const f of iframeRefs.values()) {
+				f.contentWindow?.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), '*')
+			}
+		}, 5000)
+		return () => { window.removeEventListener('message', onMsg); clearInterval(hs) }
 	}, [])
 
 	// перерисовка нужна только пока идёт хотя бы один таймер
@@ -118,6 +163,7 @@ export default function OverlayClient() {
 
 function OverlayElement({ el }: { el: StreamElement }) {
 	const [, force] = useState(0)
+	const playedRef = useRef(false)
 
 	useEffect(() => {
 		if (el.type !== 'timer' || !el.isRunning) return
@@ -164,8 +210,12 @@ function OverlayElement({ el }: { el: StreamElement }) {
 		return (
 			<div style={style}>
 				<iframe
-					src={toEmbedUrl(el.src || '')}
+					src={withAutoplay(toEmbedUrl(el.src || ''), el.autoplay)}
 					title='embed'
+					ref={(f) => {
+						if (f) iframeRefs.set(el.id, f)
+						else iframeRefs.delete(el.id)
+					}}
 					style={{ width: '100%', height: '100%', border: 'none' }}
 					allow='autoplay; encrypted-media; picture-in-picture; fullscreen'
 					allowFullScreen
@@ -202,6 +252,17 @@ function OverlayElement({ el }: { el: StreamElement }) {
 			el.timerDirection === 'down' && el.duration
 				? formatTime(Math.max(0, el.duration - elapsedSec))
 				: formatTime(elapsedSec)
+		// одиночный звуковой сигнал в момент, когда обратный отсчёт дошёл до нуля
+		const remaining = el.timerDirection === 'down' && el.duration ? el.duration - elapsedSec : null
+		if (remaining !== null && remaining <= 0) {
+			if (el.isRunning && !playedRef.current) {
+				playedRef.current = true
+				playFinishSound()
+			}
+			if (!el.isRunning) playedRef.current = false
+		} else {
+			playedRef.current = false
+		}
 		return (
 			<div
 				style={{

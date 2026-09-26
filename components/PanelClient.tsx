@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io as ioInit, Socket } from "socket.io-client";
 import type { SyncState, StreamElement } from "@/lib/types";
-import { toEmbedUrl } from "@/lib/embed";
+import { toEmbedUrl, withAutoplay } from "@/lib/embed";
+import { playFinishSound } from "@/lib/sound";
 import ObsPanel from "@/components/ObsPanel";
 
 const CANVAS_W = 1920;
@@ -15,6 +16,7 @@ export default function PanelClient() {
   const [tab, setTab] = useState<"elements" | "obs">("elements");
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [interactiveIframeId, setInteractiveIframeId] = useState<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const [view, setView] = useState({ x: 0, y: 0, s: 0.3 });
   const viewRef = useRef(view);
@@ -107,6 +109,66 @@ export default function PanelClient() {
     pendingUpdatesRef.current.set(id, { partial: merged, timer });
   }, [emit]);
 
+  // ретрансляция состояния плеера из превью: что происходит в превью — повторяется в оверлее
+  const previewStateRef = useRef<Map<string, number>>(new Map());
+  const lastTimeRelayRef = useRef(0);
+
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      const f = document.querySelector('iframe[title="embed"]') as HTMLIFrameElement | null;
+      if (!f || !f.contentWindow || e.source !== f.contentWindow) return;
+      const id = f.getAttribute("data-id");
+      if (!id) return;
+      try {
+        const d = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
+        if (!d || d.event !== "infoDelivery" || !d.info) return;
+        if (d.info.playerState !== undefined) {
+          const st = d.info.playerState;
+          const prev = previewStateRef.current.get(id);
+          if (st !== prev) {
+            previewStateRef.current.set(id, st);
+            // 1 = играет, 2 = пауза, 0 = закончилось; 3 (буферизация) не шлём
+            if (st === 1) {
+              emit("element:command", { id, cmd: "playVideo" });
+              if (d.info.currentTime !== undefined) emit("element:command", { id, cmd: "time", value: d.info.currentTime });
+            } else if (st === 2 || st === 0) emit("element:command", { id, cmd: "pauseVideo" });
+          }
+        }
+        // позиция воспроизведения — не чаще раза в секунду (оверлей подтянется при дрейфе > 2с)
+        if (d.info.currentTime !== undefined) {
+          const now = performance.now();
+          if (now - lastTimeRelayRef.current >= 1000) {
+            lastTimeRelayRef.current = now;
+            emit("element:command", { id, cmd: "time", value: d.info.currentTime });
+          }
+        }
+        if (d.info.volume !== undefined) {
+          const v = Math.max(0, Math.min(100, Math.round(d.info.volume)));
+          emit("element:command", { id, cmd: "setVolume", value: v });
+        }
+        if (d.info.muted !== undefined) {
+          emit("element:command", { id, cmd: d.info.muted ? "mute" : "unMute" });
+        }
+      } catch {}
+    };
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, [emit]);
+
+  // handshake: подписываемся на отчёты плеера превью (повторяем — если плеер загрузился позже)
+  useEffect(() => {
+    const t = setInterval(() => {
+      const f = document.querySelector('iframe[title="embed"]') as HTMLIFrameElement | null;
+      f?.contentWindow?.postMessage(JSON.stringify({ event: "listening", id: 1, channel: "widget" }), "*");
+    }, 5000);
+    return () => clearInterval(t);
+  }, []);
+
+  // интерактив iframe действует только пока выбран именно он
+  useEffect(() => {
+    if (selectedId !== interactiveIframeId) setInteractiveIframeId(null);
+  }, [selectedId, interactiveIframeId]);
+
   const addElement = useCallback(
     (el: Omit<StreamElement, "id" | "zIndex" | "visible">) => {
       emit("element:add", { ...el, visible: true });
@@ -122,19 +184,31 @@ export default function PanelClient() {
       r.readAsDataURL(file);
     });
 
+  // пробуем натуральный размер картинки, чтобы элемент спавнился без искажений
+  const getImageSize = (src: string): Promise<{ w: number; h: number }> =>
+    new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve({ w: img.naturalWidth || 400, h: img.naturalHeight || 225 });
+      img.onerror = () => resolve({ w: 400, h: 225 });
+      img.src = src;
+    });
+
   const selected = state.elements.find((e) => e.id === selectedId) || null;
 
-  const parkingSpot = () => ({ x: -400, y: -400 });
+  const parkingSpot = () => ({ x: 0, y: 1200 });
 
-  const dragRef = useRef<{ id: string; offX: number; offY: number } | null>(null);
+  const dragRef = useRef<{ id: string; offX: number; offY: number; type: string; moved: boolean; sx: number; sy: number } | null>(null);
 
   const handleDragStart = (e: React.MouseEvent, el: StreamElement) => {
+    if (el.locked) return;
     e.preventDefault();
     const { x: vx, y: vy, s } = viewRef.current;
     const rect = viewportRef.current!.getBoundingClientRect();
     const lx = (e.clientX - rect.left - vx) / s;
     const ly = (e.clientY - rect.top - vy) / s;
-    dragRef.current = { id: el.id, offX: lx - el.x, offY: ly - el.y };
+    dragRef.current = { id: el.id, offX: lx - el.x, offY: ly - el.y, type: el.type, moved: false, sx: e.clientX, sy: e.clientY };
+    if (el.type !== "iframe") setInteractiveIframeId(null);
+    document.body.classList.add("dragging");
     setSelectedId(el.id);
   };
 
@@ -149,6 +223,7 @@ export default function PanelClient() {
       const rect = viewportRef.current.getBoundingClientRect();
       const lx = (e.clientX - rect.left - vx) / s;
       const ly = (e.clientY - rect.top - vy) / s;
+      if (!dragRef.current.moved && (Math.abs(e.clientX - dragRef.current.sx) > 4 || Math.abs(e.clientY - dragRef.current.sy) > 4)) dragRef.current.moved = true;
       const x = Math.round(lx - dragRef.current.offX);
       const y = Math.round(ly - dragRef.current.offY);
       const id = dragRef.current.id;
@@ -167,7 +242,12 @@ export default function PanelClient() {
   );
 
   const handleMouseUp = useCallback(() => {
+    if (dragRef.current?.type === "iframe") {
+      // клик по iframe без перетаскивания = активируем интерактив (управление плеером внутри)
+      setInteractiveIframeId(dragRef.current.moved ? null : dragRef.current.id);
+    }
     dragRef.current = null;
+    document.body.classList.remove("dragging");
     if (lastMoveRef.current) {
       moveThrottleRef.current = 0;
       emit("element:move", lastMoveRef.current);
@@ -203,6 +283,7 @@ export default function PanelClient() {
   const handleResizeStart = (e: React.MouseEvent, el: StreamElement, dir: string) => {
     e.preventDefault();
     e.stopPropagation();
+    document.body.classList.add("dragging");
     resizeRef.current = {
       id: el.id, dir,
       sx: e.clientX, sy: e.clientY,
@@ -260,6 +341,7 @@ export default function PanelClient() {
   useEffect(() => {
     const fn = () => {
       resizeRef.current = null;
+      document.body.classList.remove("dragging");
       if (lastResizeRef.current) {
         resizeThrottleRef.current = 0;
         emit("element:resize", lastResizeRef.current);
@@ -328,7 +410,7 @@ export default function PanelClient() {
   }, []);
 
   return (
-    <div className="min-h-screen flex flex-col bg-bg">
+    <div className="h-screen overflow-hidden flex flex-col bg-bg">
       <header className="flex items-center gap-4 px-5 py-3 bg-panel border-b border-border">
         <div className="flex items-center gap-2">
           <div className="w-9 h-9 rounded-lg bg-accent flex items-center justify-center text-white font-bold text-lg">S</div>
@@ -375,15 +457,20 @@ export default function PanelClient() {
                   input.onchange = async () => {
                     const f = input.files?.[0]; if (!f) return;
                     const dataUrl = await fileToDataUrl(f);
+                    const size = await getImageSize(dataUrl);
+                    const k = Math.min(1, 1280 / Math.max(size.w, size.h));
                     const p = parkingSpot();
-                    addElement({ type: "image", src: dataUrl, ...p, width: 400, height: 225, text: "" });
+                    addElement({ type: "image", src: dataUrl, ...p, width: Math.round(size.w * k), height: Math.round(size.h * k), text: "" });
                   };
                   input.click();
                 }} className="flex-1 px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🖼 С ПК</button>
-                <button onClick={() => {
+                <button onClick={async () => {
                   const url = prompt("Ссылка на картинку:");
+                  if (!url) return;
+                  const size = await getImageSize(url);
+                  const k = Math.min(1, 1280 / Math.max(size.w, size.h));
                   const p = parkingSpot();
-                  if (url) addElement({ type: "image", src: url, ...p, width: 400, height: 225, text: "" });
+                  addElement({ type: "image", src: url, ...p, width: Math.round(size.w * k), height: Math.round(size.h * k), text: "" });
                 }} className="flex-1 px-3 py-2 bg-border hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">🔗 URL</button>
               </div>
               <div className="flex gap-2">
@@ -436,6 +523,7 @@ export default function PanelClient() {
                     emit("element:toggle-visible", el.id);
                   }} className="shrink-0">{el.visible ? "👁" : "🚫"}</button>
                   {el.alwaysLoaded && <span className="shrink-0 text-[10px] opacity-70" title="Всегда загружен">📦</span>}
+                  {el.locked && <span className="shrink-0 text-[10px] opacity-70" title="Заблокирован от перетаскивания">🔒</span>}
                   <span className="flex-1 truncate">
                     {el.type === "image" && "🖼 " + (el.src?.slice(0, 20) || "image")}
                     {el.type === "video" && "🎬 " + (el.src?.slice(0, 20) || "video")}
@@ -464,7 +552,7 @@ export default function PanelClient() {
                 backgroundSize: `${Math.max(4, 22 * view.s)}px ${Math.max(4, 22 * view.s)}px`,
                 backgroundPosition: `${view.x}px ${view.y}px`,
               }}
-              onClick={(e) => { if (e.target === e.currentTarget) setSelectedId(null); }}
+              onClick={(e) => { if (e.target === e.currentTarget) { setSelectedId(null); setInteractiveIframeId(null); } }}
             >
               <div className="absolute left-0 top-0"
                 style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`, transformOrigin: "0 0" }}>
@@ -485,15 +573,15 @@ export default function PanelClient() {
                 {state.elements.map((el) => {
                   const hs = 10 / view.s;
                   return (
-                    <div key={el.id} onMouseDown={(e) => handleDragStart(e, el)}
-                      className="absolute select-none cursor-grab"
-                      style={{
+                      <div key={el.id} onMouseDown={(e) => handleDragStart(e, el)}
+                        className={`absolute select-none ${el.locked ? "" : "cursor-grab"}`}
+                        style={{
                         left: el.x, top: el.y, width: el.width, height: el.height,
-                        zIndex: el.zIndex, opacity: el.visible ? (el.opacity ?? 1) : 0.35,
+                          zIndex: el.zIndex, opacity: el.visible ? Math.max(el.opacity ?? 1, 0.08) : 0.35,
                         outline: selectedId === el.id ? `${2 / view.s}px solid rgb(var(--c-accent2))` : undefined,
                       }}>
-                      <PreviewElement el={el} scale={1} />
-                      {selectedId === el.id && (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => {
+                        <PreviewElement el={el} scale={1} interactive={interactiveIframeId === el.id} />
+                        {selectedId === el.id && !el.locked && (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => {
                         const cursors: Record<string, string> = { n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize", ne: "nesw-resize", sw: "nesw-resize", nw: "nwse-resize", se: "nwse-resize" };
                         const pos: React.CSSProperties = {
                           position: "absolute", width: hs, height: hs,
@@ -510,6 +598,23 @@ export default function PanelClient() {
                           <div key={dir} onMouseDown={(e) => handleResizeStart(e, el, dir)} className="handle" style={pos} />
                         );
                       })}
+                      {el.type === "iframe" && selectedId === el.id && !el.locked && (
+                        <div onMouseDown={(e) => { e.stopPropagation(); handleDragStart(e, el); }}
+                          className="absolute flex items-center justify-center rounded-full"
+                          style={{
+                            left: `calc(50% - ${11 / view.s}px)`, top: -32 / view.s,
+                            width: 22 / view.s, height: 22 / view.s, background: "rgb(var(--c-accent2))",
+                            border: `${2 / view.s}px solid #fff`, cursor: "move",
+                            boxShadow: "0 1px 6px rgba(0,0,0,.5)",
+                          }}>
+                          <svg width={(22 / view.s) * 0.55} height={(22 / view.s) * 0.55} viewBox="0 0 24 24" fill="#fff">
+                            <path d="M12 1.5 15.5 5h-2.5v4.5h-2V5H8.5L12 1.5z" />
+                            <path d="M12 22.5 8.5 19H11v-4.5h2V19h2.5L12 22.5z" />
+                            <path d="M1.5 12 5 8.5V11h4.5v2H5v2.5L1.5 12z" />
+                            <path d="M22.5 12 19 15.5V13h-4.5v-2H19V8.5L22.5 12z" />
+                          </svg>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -523,11 +628,11 @@ export default function PanelClient() {
             </div>
           </div>
 
-          <aside className="w-72 shrink-0 bg-panel border-l border-border p-4 overflow-y-auto">
-            {selected ? <PropertyEditor el={selected} update={(partial) => updateElement(selected.id, partial)} emit={emit} /> : (
-              <div className="text-sm text-gray-600 mt-4 text-center">Выберите элемент, чтобы изменить его свойства.</div>
-            )}
-          </aside>
+          {selected && (
+            <aside className="w-72 shrink-0 bg-panel border-l border-border p-4 overflow-y-auto">
+              <PropertyEditor el={selected} update={(partial) => updateElement(selected.id, partial)} emit={emit} />
+            </aside>
+          )}
         </div>
       <div className={`flex-1 overflow-auto ${tab === "obs" ? "" : "hidden"}`}>
         <ObsPanel />
@@ -556,12 +661,12 @@ function MoonIcon() {
   );
 }
 
-function PreviewElement({ el, scale }: { el: StreamElement; scale: number }) {
+function PreviewElement({ el, scale, interactive }: { el: StreamElement; scale: number; interactive?: boolean }) {
   if (el.type === "image" || el.type === "gif") return <img src={el.src} alt="" className="w-full h-full object-fill pointer-events-none" draggable={false} />;
   if (el.type === "iframe")
     return (
-      <iframe src={toEmbedUrl(el.src || "")} title="embed"
-        className="w-full h-full pointer-events-none" style={{ border: 0 }}
+      <iframe src={withAutoplay(toEmbedUrl(el.src || ""), el.autoplay)} title="embed" data-id={el.id}
+        className="w-full h-full" style={{ border: 0, pointerEvents: interactive ? "auto" : "none" }}
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen />
     );
   if (el.type === "video") return <video src={el.src} className="w-full h-full object-fill pointer-events-none" muted loop autoPlay playsInline />;
@@ -577,6 +682,7 @@ function PreviewElement({ el, scale }: { el: StreamElement; scale: number }) {
 
 function TimerPreview({ el, scale }: { el: StreamElement; scale: number }) {
   const [, force] = useState(0);
+  const playedRef = useRef(false);
 
   useEffect(() => {
     if (!el.isRunning) return;
@@ -589,6 +695,17 @@ function TimerPreview({ el, scale }: { el: StreamElement; scale: number }) {
   const display = el.timerDirection === "down" && el.duration
     ? formatTime(Math.max(0, el.duration - elapsedSec))
     : formatTime(elapsedSec);
+  // звук окончания — и в панели тоже (однократно на каждый запуск)
+  const remaining = el.timerDirection === "down" && el.duration ? el.duration - elapsedSec : null;
+  if (remaining !== null && remaining <= 0) {
+    if (el.isRunning && !playedRef.current) {
+      playedRef.current = true;
+      playFinishSound();
+    }
+    if (!el.isRunning) playedRef.current = false;
+  } else {
+    playedRef.current = false;
+  }
   const bg = el.bgColor === "transparent" ? "none" : el.bgColor;
 
   return (
@@ -625,6 +742,18 @@ function PropertyEditor({ el, update, emit }: { el: StreamElement; update: (part
         <button onClick={() => emit("element:reorder", { id: el.id, direction: "up" })} className="flex-1 px-2 py-1.5 text-xs bg-border hover:bg-gray-600 rounded-lg">↑ Вперёд</button>
         <button onClick={() => emit("element:reorder", { id: el.id, direction: "down" })} className="flex-1 px-2 py-1.5 text-xs bg-border hover:bg-gray-600 rounded-lg">↓ Назад</button>
       </div>
+      <button onClick={() => emit("element:add", { ...el, id: undefined, zIndex: undefined, locked: false, x: el.x + 30, y: el.y + 30 })}
+        className="w-full px-3 py-2 bg-border hover:bg-gray-600 text-white text-sm rounded-lg">⧉ Дублировать элемент</button>
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <label className="text-xs text-gray-500 block">Замок</label>
+          <p className="text-[10px] text-gray-600 leading-tight">Защита от случайного перетаскивания</p>
+        </div>
+        <button onClick={() => update({ locked: !el.locked })}
+          className={`w-9 h-5 rounded-full transition-colors shrink-0 relative ${el.locked ? "bg-green-500" : "bg-gray-600"}`}>
+          <span className="absolute top-[2px] w-4 h-4 bg-white rounded-full transition-all" style={{ left: el.locked ? 18 : 2 }} />
+        </button>
+      </div>
       <div className="flex items-center justify-between gap-2">
         <div>
           <label className="text-xs text-gray-500 block">Всегда загружен</label>
@@ -636,22 +765,22 @@ function PropertyEditor({ el, update, emit }: { el: StreamElement; update: (part
             style={{ left: el.alwaysLoaded ? 18 : 2 }} />
         </button>
       </div>
-      {(el.type === "image" || el.type === "video" || el.type === "gif" || el.type === "text") && (
-        <div>
-          <label className="text-xs text-gray-500 block mb-1">Прозрачность: {Math.round((el.opacity ?? 1) * 100)}%</label>
-          {(() => {
-            // заливка заканчивается по центру кружка (кружок 14px) — не торчит на краях
-            const frac = ((Math.round((el.opacity ?? 1) * 100) - 10) / 90).toFixed(4);
-            const edge = `calc(7px + (100% - 14px) * ${frac})`;
-            return (
-              <input type="range" min={10} max={100} step={5} value={Math.round((el.opacity ?? 1) * 100)}
-                onChange={(e) => update({ opacity: Number(e.target.value) / 100 })}
-                className="w-full"
-                style={{ background: `linear-gradient(to right, rgb(var(--c-accent)) 0, rgb(var(--c-accent)) ${edge}, rgb(var(--c-border)) ${edge}, rgb(var(--c-border)) 100%)` }} />
-            );
-          })()}
-        </div>
-      )}
+      <div>
+        <label className="text-xs text-gray-500 block mb-1">Прозрачность: {Math.round((el.opacity ?? 1) * 100)}%</label>
+        {(() => {
+          // заливка заканчивается по центру кружка (кружок 14px) — не торчит на краях
+          const pct = Math.round((el.opacity ?? 1) * 100);
+          const frac = (pct / 100).toFixed(4);
+          const edge = `calc(7px + (100% - 14px) * ${frac})`;
+          return (
+            <input type="range" min={0} max={100} step={5} value={pct}
+              onChange={(e) => update({ opacity: Number(e.target.value) / 100 })}
+              className="w-full"
+              style={{ background: `linear-gradient(to right, rgb(var(--c-accent)) 0, rgb(var(--c-accent)) ${edge}, rgb(var(--c-border)) ${edge}, rgb(var(--c-border)) 100%)` }} />
+          );
+        })()}
+        {Math.round((el.opacity ?? 1) * 100) === 0 && <p className="text-[10px] text-gray-600 mt-1">Элемент скрыт на стриме; в превью он еле заметен</p>}
+      </div>
       {el.type === "text" && (
         <>
           <div>

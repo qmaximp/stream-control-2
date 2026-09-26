@@ -132,6 +132,10 @@ app.prepare().then(() => {
       }
     });
 
+    socket.on('element:command', (data) => {
+      socket.broadcast.emit('element:command', data);
+    });
+
     socket.on('elements:clear', () => {
       state.elements = [];
       io.emit('elements:cleared');
