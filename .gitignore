@@ -4,3 +4,5 @@ out/
 *.log
 .env.local
 tsconfig.tsbuildinfo
+uploads/
+data/

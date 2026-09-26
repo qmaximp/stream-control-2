@@ -34,6 +34,27 @@ npm run dev
 2. Порт: 4455
 3. В панели: вкладка "Управление OBS" → подключиться
 
+## Авторизация через Twitch
+
+Главная страница — вход через Twitch OAuth. После входа открывается личный кабинет
+с генератором личных ссылок на панель и оверлей.
+
+Настройка (один раз):
+1. Зайдите на https://dev.twitch.tv/console → **Register Your Application**:
+   - Name — любое;
+   - OAuth Redirect URLs — `http://localhost:3000/api/auth/twitch/callback`
+     (для Render добавьте отдельной строкой `https://ваш-домен.onrender.com/api/auth/twitch/callback`);
+   - Category — **Website Integration**, Client Type — **Confidential**.
+2. Скопируйте **Client ID** и сгенерируйте **Client Secret**.
+3. Впишите в `.env.local`:
+   ```
+   TWITCH_CLIENT_ID=ваш_client_id
+   TWITCH_CLIENT_SECRET=ваш_client_secret
+   # если порт отличается от 3000 — укажите redirect URL явно:
+   # TWITCH_REDIRECT_URI=http://localhost:3001/api/auth/twitch/callback
+   ```
+4. Перезапустите сервер.
+
 ## Деплой
 
 ⚠️ **Vercel не подходит.** Проект — это постоянный Node-сервер (`server.js`) + Socket.io,
