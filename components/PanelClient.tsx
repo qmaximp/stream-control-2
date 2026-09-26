@@ -28,6 +28,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
   const [emoteError, setEmoteError] = useState("");
   const [emoteQuery, setEmoteQuery] = useState("");
   const [emotePlatform, setEmotePlatform] = useState<"all" | "twitch" | "7tv" | "bttv" | "ffz">("all");
+  const [emoteNotes, setEmoteNotes] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [interactiveIframeId, setInteractiveIframeId] = useState<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -221,6 +222,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
       const j = await res.json();
       if (!res.ok) throw new Error(j?.error || "Ошибка загрузки");
       setEmotes(j.emotes ?? []);
+      setEmoteNotes(j.notes ?? []);
       if (!j.emotes?.length) setEmoteError("Смайлики не найдены. Проверьте TWITCH_CLIENT_ID/SECRET в .env.local или попробуйте позже.");
     } catch (e: any) {
       setEmoteError(e?.message || "Не удалось загрузить смайлики");
@@ -721,6 +723,9 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
               </div>
             </div>
             <div className="flex-1 overflow-y-auto p-3">
+              {emoteNotes.map((n, i) => (
+                <p key={i} className="text-xs text-amber-400/90 bg-amber-950/30 border border-amber-900/40 rounded-lg px-3 py-2 mb-3">{n}</p>
+              ))}
               {emoteLoading ? (
                 <p className="text-sm text-gray-500 text-center py-10">Загружаем смайлики с Twitch, 7TV, BetterTTV и FrankerFaceZ…</p>
               ) : emoteError && emotes.length === 0 ? (

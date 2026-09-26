@@ -118,6 +118,9 @@ export default function ObsPanel() {
 
   return (
     <div className="min-h-[calc(100vh-100px)] p-6">
+      <p className="text-sm text-amber-400/90 bg-amber-950/30 border border-amber-900/40 rounded-lg px-4 py-3 mb-6 max-w-md">
+        Тестовая функция — работает только на ПК стримера
+      </p>
       <div className="max-w-md bg-panel rounded-xl border border-border p-5 mb-6">
         <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
           <span className={`w-3 h-3 rounded-full ${connected ? "bg-green-400" : "bg-red-400"}`} />

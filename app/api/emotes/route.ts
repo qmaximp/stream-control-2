@@ -133,7 +133,7 @@ async function twitchEmotes(broadcasterId: string | null, user: { token: string;
   return out;
 }
 
-async function sevenTv(broadcasterId: string | null): Promise<Emote[]> {
+async function sevenTv(broadcasterId: string | null): Promise<{ emotes: Emote[]; note?: string }> {
   const out: Emote[] = [];
   const url = (e: any) => {
     const host = e.data?.host;
@@ -146,9 +146,13 @@ async function sevenTv(broadcasterId: string | null): Promise<Emote[]> {
   for (const e of g?.emotes ?? []) { const u = url(e); if (u) out.push({ platform: "7tv", code: e.name, url: u }); }
   if (broadcasterId) {
     const u = await safe(() => fetch(`https://7tv.io/v3/users/twitch/${broadcasterId}`).then((r) => r.json()));
+    // 7tv.io отдаёт "user not found", если 7tv-аккаунт не привязан к Twitch-аккаунту канала
+    if (!u || u.error_code) {
+      return { emotes: out, note: "7TV: смайлики вашего канала недоступны — зайдите на 7tv.app через Twitch (Connections), и они появятся здесь" };
+    }
     for (const e of u?.emote_set?.emotes ?? []) { const eu = url(e); if (eu) out.push({ platform: "7tv", code: e.name, url: eu }); }
   }
-  return out;
+  return { emotes: out };
 }
 
 async function bttv(broadcasterId: string | null): Promise<Emote[]> {
@@ -189,17 +193,19 @@ export async function GET(req: Request) {
   let broadcasterId: string | null = null;
   if (channel) broadcasterId = await twitchUserId(channel);
   const user = await resolveUserToken(req, channel);
-  const [t, s, b, f] = await Promise.all([
+  const [t, s7, b, f] = await Promise.all([
     safe(() => twitchEmotes(broadcasterId, user)), safe(() => sevenTv(broadcasterId)),
     safe(() => bttv(broadcasterId)), safe(() => ffz(broadcasterId)),
   ]);
+  const notes: string[] = [];
+  if (s7?.note) notes.push(s7.note);
   // дедупликация в рамках платформы (канальные наборы частично пересекаются с глобальными)
   const seen = new Set<string>();
-  const emotes = [...(t ?? []), ...(s ?? []), ...(b ?? []), ...(f ?? [])].filter((e) => {
+  const emotes = [...(t ?? []), ...(s7?.emotes ?? []), ...(b ?? []), ...(f ?? [])].filter((e) => {
     const key = `${e.platform}|${e.code}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
-  return json({ channel, emotes });
+  return json({ channel, emotes, notes });
 }
