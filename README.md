@@ -1,4 +1,4 @@
-# Stream Control Panel — OBS управление оверлеем
+# Ovrly — OBS управление оверлеем
 
 Панель управления стримом для модератора.
 
@@ -16,7 +16,7 @@
 ## Локальный запуск
 
 ```bash
-cd obs-stream-control
+cd ovrly
 npm install
 npm run dev
 ```
@@ -65,7 +65,7 @@ WebSocket-соединений там нет, панель и оверлей н�
 1. Загрузите код в GitHub-репозиторий:
    ```bash
    git init && git add -A && git commit -m "init"
-   git remote add origin https://github.com/<вы>/stream-control.git
+   git remote add origin https://github.com/<вы>/ovrly.git
    git push -u origin main
    ```
 2. [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub repo** → выберите репозиторий.

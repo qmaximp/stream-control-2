@@ -6,15 +6,28 @@ import type { SyncState, StreamElement } from "@/lib/types";
 import { toEmbedUrl, withAutoplay } from "@/lib/embed";
 import { playFinishSound } from "@/lib/sound";
 import ObsPanel from "@/components/ObsPanel";
+import LogoMark from "@/components/LogoMark";
 
 const CANVAS_W = 1920;
 const CANVAS_H = 1080;
 
-export default function PanelClient() {
+type Emote = { platform: string; code: string; url: string };
+
+export default function PanelClient({ channel }: { channel?: string | null }) {
   const [state, setState] = useState<SyncState>({ elements: [], canvasW: CANVAS_W, canvasH: CANVAS_H });
   const [connected, setConnected] = useState(false);
   const [tab, setTab] = useState<"elements" | "obs">("elements");
   const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [previewOn, setPreviewOn] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+  const parentHost = typeof window !== "undefined" ? window.location.hostname : "localhost";
+  const [emoteOpen, setEmoteOpen] = useState(false);
+  const [emotes, setEmotes] = useState<Emote[]>([]);
+  const [emoteLoading, setEmoteLoading] = useState(false);
+  const [emoteError, setEmoteError] = useState("");
+  const [emoteQuery, setEmoteQuery] = useState("");
+  const [emotePlatform, setEmotePlatform] = useState<"all" | "twitch" | "7tv" | "bttv" | "ffz">("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [interactiveIframeId, setInteractiveIframeId] = useState<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
@@ -196,6 +209,30 @@ export default function PanelClient() {
   const selected = state.elements.find((e) => e.id === selectedId) || null;
 
   const parkingSpot = () => ({ x: 0, y: 1200 });
+
+  const openEmotePicker = useCallback(async () => {
+    setEmoteOpen(true);
+    setEmoteLoading(true);
+    setEmoteError("");
+    setEmoteQuery("");
+    setEmotePlatform("all");
+    try {
+      const res = await fetch(`/api/emotes${channel ? `?channel=${encodeURIComponent(channel)}` : ""}`);
+      const j = await res.json();
+      if (!res.ok) throw new Error(j?.error || "Ошибка загрузки");
+      setEmotes(j.emotes ?? []);
+      if (!j.emotes?.length) setEmoteError("Смайлики не найдены. Проверьте TWITCH_CLIENT_ID/SECRET в .env.local или попробуйте позже.");
+    } catch (e: any) {
+      setEmoteError(e?.message || "Не удалось загрузить смайлики");
+    } finally {
+      setEmoteLoading(false);
+    }
+  }, [channel]);
+
+  const addEmote = useCallback((em: Emote) => {
+    const p = parkingSpot();
+    addElement({ type: "image", src: em.url, ...p, width: 96, height: 96, text: "" });
+  }, [addElement]);
 
   const dragRef = useRef<{ id: string; offX: number; offY: number; type: string; moved: boolean; sx: number; sy: number } | null>(null);
 
@@ -413,9 +450,9 @@ export default function PanelClient() {
     <div className="h-screen overflow-hidden flex flex-col bg-bg">
       <header className="flex items-center gap-4 px-5 py-3 bg-panel border-b border-border">
         <div className="flex items-center gap-2">
-          <div className="w-9 h-9 rounded-lg bg-accent flex items-center justify-center text-white font-bold text-lg">S</div>
+          <LogoMark size={36} />
           <div>
-            <h1 className="text-base font-semibold leading-tight">Stream Control</h1>
+            <h1 className="text-base font-semibold leading-tight">Ovrly</h1>
             <p className="text-xs text-gray-500 leading-tight">Панель модератора</p>
           </div>
         </div>
@@ -492,6 +529,7 @@ export default function PanelClient() {
                   if (url) addElement({ type: "video", src: url, ...p, width: 480, height: 270, text: "" });
                 }} className="flex-1 px-3 py-2 bg-border hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">🔗 URL</button>
               </div>
+              <button onClick={openEmotePicker} className="w-full px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">😀 Добавить смайлик</button>
               <button onClick={() => {
                 const p = parkingSpot();
                 const url = prompt("Ссылка на сайт или YouTube (например, https://youtube.com/watch?v=...):");
@@ -559,8 +597,15 @@ export default function PanelClient() {
                 <div className="absolute bg-black border border-border rounded-md pointer-events-none"
                   style={{ left: 0, top: 0, width: state.canvasW, height: state.canvasH }}>
                   <div className="absolute inset-0 opacity-10" style={{ backgroundImage: "linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)", backgroundSize: "40px 40px" }} />
-                  <span className="absolute text-gray-600 pointer-events-none"
-                    style={{ bottom: 8, right: 16, fontSize: 20 }}>экран {state.canvasW} × {state.canvasH}</span>
+                  {mounted && previewOn && channel && (
+                    <iframe
+                      src={`https://player.twitch.tv/?channel=${encodeURIComponent(channel)}&parent=${parentHost}&muted=true`}
+                      title="Превью стрима Twitch"
+                      className="absolute inset-0 w-full h-full rounded-md"
+                      style={{ border: 0 }}
+                      allow="autoplay; fullscreen"
+                    />
+                  )}
                 </div>
                 <span className="absolute text-center tracking-widest text-gray-600 uppercase pointer-events-none"
                   style={{ left: 0, top: -175, width: state.canvasW, fontSize: 28 }}>зона предзагрузки элементов</span>
@@ -619,6 +664,22 @@ export default function PanelClient() {
                   );
                 })}
               </div>
+              <div
+                className="absolute right-4 bottom-3 z-10 flex items-center gap-2 bg-panel border border-border rounded-full pl-3 pr-2 py-1.5"
+                style={{ boxShadow: "0 2px 10px rgba(0,0,0,.25)" }}
+                onMouseDown={(e) => e.stopPropagation()}
+              >
+                <span className="text-xs text-gray-400 select-none">Превью</span>
+                <button
+                  onClick={() => setPreviewOn((v) => !v)}
+                  disabled={!channel}
+                  title={channel ? "Стрим Twitch в превью холста" : "Вход не выполнен: превью доступно после входа через Twitch"}
+                  className={`w-9 h-5 rounded-full transition-colors shrink-0 relative ${previewOn ? "bg-green-500" : "bg-gray-600"} ${channel ? "" : "opacity-50 cursor-not-allowed"}`}
+                >
+                  <span className="absolute top-[2px] w-4 h-4 bg-white rounded-full transition-all" style={{ left: previewOn ? 18 : 2 }} />
+                </button>
+                <span className={`text-xs font-medium select-none ${previewOn ? "text-green-400" : "text-gray-500"}`}>{previewOn ? "ON" : "OFF"}</span>
+              </div>
             </div>
             <div className="shrink-0 flex items-center gap-2 px-6 pb-3">
               <span className="bg-panel border border-border rounded px-2 py-1 text-[10px] text-gray-400">🔍 {Math.round((view.s / (baseViewRef.current?.s ?? view.s)) * 100)}%</span>
@@ -637,6 +698,58 @@ export default function PanelClient() {
       <div className={`flex-1 overflow-auto ${tab === "obs" ? "" : "hidden"}`}>
         <ObsPanel />
       </div>
+
+      {emoteOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center" onMouseDown={() => setEmoteOpen(false)}>
+          <div className="bg-panel border border-border rounded-xl w-[620px] max-w-[94vw] max-h-[78vh] flex flex-col" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+              <h3 className="text-sm font-semibold">Смайлики {channel ? <span className="text-gray-500 font-normal">· канал {channel}</span> : <span className="text-gray-500 font-normal">· только глобальные</span>}</h3>
+              <div className="flex items-center gap-1">
+                <button onClick={openEmotePicker} title="Обновить — подтянуть свежие смайлики"
+                  className="w-7 h-7 rounded-lg hover:bg-border text-gray-400 hover:text-white transition-colors">↻</button>
+                <button onClick={() => setEmoteOpen(false)} className="w-7 h-7 rounded-lg hover:bg-border text-gray-400 hover:text-white transition-colors">✕</button>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 px-4 py-2 border-b border-border">
+              <input value={emoteQuery} onChange={(e) => setEmoteQuery(e.target.value)} placeholder="Поиск по названию…"
+                className="flex-1 px-3 py-1.5 bg-bg border border-border rounded-lg text-sm" />
+              <div className="flex gap-1">
+                {([["all", "Все"], ["twitch", "Twitch"], ["7tv", "7TV"], ["bttv", "BTTV"], ["ffz", "FFZ"]] as const).map(([k, label]) => (
+                  <button key={k} onClick={() => setEmotePlatform(k)}
+                    className={`px-2 py-1 text-xs rounded-lg transition-colors ${emotePlatform === k ? "bg-accent text-white" : "text-gray-400 hover:bg-border"}`}>{label}</button>
+                ))}
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3">
+              {emoteLoading ? (
+                <p className="text-sm text-gray-500 text-center py-10">Загружаем смайлики с Twitch, 7TV, BetterTTV и FrankerFaceZ…</p>
+              ) : emoteError && emotes.length === 0 ? (
+                <p className="text-sm text-red-400 text-center py-10">{emoteError}</p>
+              ) : (() => {
+                const q = emoteQuery.trim().toLowerCase();
+                const list = emotes.filter((e) =>
+                  (emotePlatform === "all" || e.platform === emotePlatform) && (!q || e.code.toLowerCase().includes(q)));
+                if (!list.length) return <p className="text-sm text-gray-500 text-center py-10">Ничего не найдено</p>;
+                return (
+                  <div className="grid grid-cols-6 gap-1.5">
+                    {list.slice(0, 300).map((e, i) => (
+                      <button key={e.platform + e.code + i} onClick={() => addEmote(e)}
+                        title={`${e.code} · ${e.platform}`}
+                        className="flex flex-col items-center gap-1 px-1 py-2 rounded-lg hover:bg-border transition-colors">
+                        <img src={e.url} alt={e.code} className="w-9 h-9 object-contain" loading="lazy" />
+                        <span className="text-[10px] text-gray-500 truncate w-full text-center">{e.code}</span>
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
+            </div>
+            <div className="px-4 py-2 border-t border-border text-[10px] text-gray-500">
+              Клик по смайлику — добавить на холст{emotes.length ? ` · синхронизировано: ${emotes.length}` : ""}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

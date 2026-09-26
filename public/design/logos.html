@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Ovrly — вариации логотипа</title>
+<style>
+  body { margin: 0; background: #0f0f14; color: #e5e7eb; font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; padding: 32px; }
+  h1 { font-size: 20px; margin: 0 0 24px; color: #a78bfa; }
+  .grid { display: grid; grid-template-columns: repeat(2, 420px); gap: 24px; }
+  .card { background: #1a1a24; border: 1px solid #2a2a38; border-radius: 16px; padding: 28px; display: flex; align-items: center; gap: 24px; }
+  .card .mark { width: 72px; height: 72px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  .card .wordmark { font-size: 30px; font-weight: 700; letter-spacing: 0.5px; color: #e5e7eb; }
+  .card .meta { margin-top: 6px; font-size: 13px; color: #8a86a3; line-height: 1.45; }
+  .card .meta b { color: #a78bfa; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Ovrly — вариации логотипа</h1>
+<div class="grid">
+
+  <div class="card" id="v1">
+    <div class="mark">
+      <svg width="64" height="64" viewBox="0 0 64 64">
+        <rect x="20" y="4" width="34" height="34" rx="9" fill="none" stroke="#a78bfa" stroke-opacity="0.4" stroke-width="3"/>
+        <rect x="12" y="14" width="34" height="34" rx="9" fill="#a78bfa" fill-opacity="0.35"/>
+        <rect x="4" y="24" width="34" height="34" rx="9" fill="#7c3aed"/>
+      </svg>
+    </div>
+    <div>
+      <div class="wordmark">Ovrly</div>
+      <div class="meta"><b>1. Слои</b> — стопка карточек-слоёв: суть оверлея, элементы друг над другом</div>
+    </div>
+  </div>
+
+  <div class="card" id="v2">
+    <div class="mark">
+      <svg width="64" height="64" viewBox="0 0 64 64">
+        <circle cx="30" cy="36" r="17" fill="none" stroke="#7c3aed" stroke-width="10"/>
+        <rect x="37" y="6" width="20" height="15" rx="5" fill="#a78bfa" transform="rotate(-10 47 13)"/>
+      </svg>
+    </div>
+    <div>
+      <div class="wordmark">Ovrly</div>
+      <div class="meta"><b>2. Кольцо + карточка</b> — буква O, над которой парит слой-элемент</div>
+    </div>
+  </div>
+
+  <div class="card" id="v3">
+    <div class="mark">
+      <svg width="64" height="64" viewBox="0 0 64 64">
+        <rect x="8" y="8" width="48" height="48" rx="14" fill="#1a1a24" stroke="#2a2a38" stroke-width="2"/>
+        <path d="M26 22 L44 32 L26 42 Z" fill="#7c3aed"/>
+        <rect x="34" y="34" width="22" height="22" rx="7" fill="#a78bfa" fill-opacity="0.9"/>
+      </svg>
+    </div>
+    <div>
+      <div class="wordmark">Ovrly</div>
+      <div class="meta"><b>3. Плей + слой</b> — экран стрима и элемент поверх: прямая отсылка к эфиру</div>
+    </div>
+  </div>
+
+  <div class="card" id="v4">
+    <div class="mark">
+      <svg width="64" height="64" viewBox="0 0 64 64">
+        <circle cx="25" cy="37" r="13" fill="none" stroke="#7c3aed" stroke-width="10"/>
+        <circle cx="41" cy="29" r="13" fill="none" stroke="#a78bfa" stroke-width="10"/>
+      </svg>
+    </div>
+    <div>
+      <div class="wordmark">Ovrly</div>
+      <div class="meta"><b>4. Перекрытие</b> — два кольца внахлёст: наложение слоёв друг на друга</div>
+    </div>
+  </div>
+
+  <div class="card" id="v5">
+    <div class="mark">
+      <svg width="64" height="64" viewBox="0 0 64 64">
+        <path d="M31 13 A19 19 0 0 0 31 51" fill="none" stroke="#7c3aed" stroke-width="10" stroke-linecap="round"/>
+        <path d="M36 11 A19 19 0 0 1 36 49" fill="none" stroke="#a78bfa" stroke-width="10" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div>
+      <div class="wordmark">Ovrly</div>
+      <div class="meta"><b>5. Смещённая O</b> — буква O с «съехавшей» половиной, как слои при печати</div>
+    </div>
+  </div>
+
+  <div class="card" id="v6">
+    <div class="mark">
+      <svg width="64" height="64" viewBox="0 0 64 64">
+        <rect x="10" y="24" width="44" height="30" rx="6" fill="#1a1a24" stroke="#a78bfa" stroke-opacity="0.5" stroke-width="2.5"/>
+        <rect x="19" y="9" width="26" height="18" rx="6" fill="#7c3aed"/>
+        <line x1="25" y1="15" x2="39" y2="15" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+        <line x1="25" y1="20.5" x2="35" y2="20.5" stroke="#fff" stroke-opacity="0.7" stroke-width="2.5" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div>
+      <div class="wordmark">Ovrly</div>
+      <div class="meta"><b>6. Экран + элемент</b> — карточка парит над экраном: элемент оверлея в кадре</div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

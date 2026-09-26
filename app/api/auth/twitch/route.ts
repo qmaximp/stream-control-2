@@ -12,7 +12,7 @@ export async function GET(req: Request) {
   authUrl.searchParams.set("client_id", clientId);
   authUrl.searchParams.set("redirect_uri", redirectUri);
   authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("scope", "user:read:email");
+  authUrl.searchParams.set("scope", "user:read:email user:read:emotes");
   authUrl.searchParams.set("state", state);
   const res = NextResponse.redirect(authUrl.toString());
   res.cookies.set("sc_oauth_state", state, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 600 });

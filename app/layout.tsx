@@ -2,8 +2,9 @@ import './globals.css'
 import type { Metadata } from 'next'
 
 export const metadata: Metadata = {
-  title: 'Stream Control Panel',
-  description: 'OBS Stream Control',
+  title: 'Ovrly',
+  description: 'Ovrly — управление оверлеем OBS',
+  icons: { icon: '/favicon.svg' },
 }
 
 const themeInit = `try{if(localStorage.getItem('theme')==='light')document.documentElement.classList.add('light')}catch(e){}`

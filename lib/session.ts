@@ -1,11 +1,14 @@
 import crypto from "crypto";
 
-const SECRET = process.env.SESSION_SECRET || process.env.TWITCH_CLIENT_SECRET || "stream-control-dev-secret";
+const SECRET = process.env.SESSION_SECRET || process.env.TWITCH_CLIENT_SECRET || "ovrly-dev-secret";
 
 export interface TwitchSession {
   login: string;
   display_name: string;
   avatar?: string;
+  // user-токен Helix — нужен для канальных смайликов (chat/emotes/channel)
+  access_token?: string;
+  token_expires?: number; // ms epoch
 }
 
 // подписанная cookie-сессия (payload.sig), без серверного хранилища
