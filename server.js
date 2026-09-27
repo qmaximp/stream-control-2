@@ -25,7 +25,24 @@ app.prepare().then(() => {
     canvasH: CANVAS_H,
   };
 
+  // автоочистка: если 12 часов никто не менял состояние — элементы стираются
+  const IDLE_CLEAR_MS = 12 * 60 * 60 * 1000;
+  let lastActivity = Date.now();
+  setInterval(() => {
+    if (state.elements.length > 0 && Date.now() - lastActivity > IDLE_CLEAR_MS) {
+      state.elements = [];
+      io.emit('elements:cleared');
+      console.log('[ovrly] элементы очищены: 12 часов без изменений');
+    }
+  }, 60 * 1000);
+
   io.on('connection', (socket) => {
+    // любое событие от клиента считается активностью и отодвигает автоочистку
+    socket.use((event, next) => {
+      lastActivity = Date.now();
+      next();
+    });
+
     socket.emit('state:init', state);
 
     socket.on('canvas:resize', (dims) => {

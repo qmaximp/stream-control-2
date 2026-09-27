@@ -16,5 +16,9 @@ export async function GET(req: Request) {
   authUrl.searchParams.set("state", state);
   const res = NextResponse.redirect(authUrl.toString());
   res.cookies.set("sc_oauth_state", state, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 600 });
+  // куда вернуть пользователя после входа (только относительные пути внутри сайта)
+  const next = new URL(req.url).searchParams.get("next");
+  const nextSafe = next && next.startsWith("/") && !next.startsWith("//") ? next : "/cabinet";
+  res.cookies.set("sc_next", nextSafe, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 600 });
   return res;
 }

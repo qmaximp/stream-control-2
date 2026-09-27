@@ -45,6 +45,35 @@ export function writeOwner(login: string) {
   fs.writeFileSync(OWNER_FILE, JSON.stringify({ login, setAt: new Date().toISOString() }, null, 2));
 }
 
+// экран «нет регистрации»: доступ только после входа через Twitch.
+// next — куда вернуть пользователя после успешного входа (относительный путь)
+export function notRegisteredScreen(next?: string): React.ReactNode {
+  const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : "/cabinet";
+  const loginHref = `/api/auth/twitch?next=${encodeURIComponent(safeNext)}`;
+  return (
+    <main className="min-h-screen bg-bg flex flex-col items-center justify-center px-4 text-center">
+      <span className="w-14 h-14 rounded-full bg-[#9146FF] flex items-center justify-center mb-4">
+        <svg viewBox="0 0 24 24" fill="#fff" width="26" height="26">
+          <path d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714H20.57z" />
+        </svg>
+      </span>
+      <h1 className="text-xl font-semibold text-white mb-2">Вы не зарегистрированы</h1>
+      <p className="text-sm text-gray-500 max-w-sm mb-6">
+        Вход через Twitch не выполнен — пока нет доступа к этой странице. Войдите, чтобы получить кабинет и ссылки для панели.
+      </p>
+      <a
+        href={loginHref}
+        className="flex items-center gap-3 px-6 py-3 rounded-lg text-white font-medium text-base transition-colors bg-[#9146FF] hover:bg-[#772ce8]"
+      >
+        <svg viewBox="0 0 24 24" fill="#fff" width="20" height="20">
+          <path d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714H20.57z" />
+        </svg>
+        Войти через Twitch
+      </a>
+    </main>
+  );
+}
+
 // экран «ссылка недействительна» вместо приложения
 export function invalidLinkScreen(): React.ReactNode {
   return (

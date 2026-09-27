@@ -65,8 +65,17 @@ export async function GET(req: Request) {
   // первый вошедший аккаунт считается владельцем панели
   if (!readOwner()) writeOwner(u.login);
 
-  const res = seeOther("/cabinet");
+  // возврат на исходную страницу (по умолчанию кабинет)
+  const nextRaw = req.headers.get("cookie")?.match(/(?:^|;\s*)sc_next=([^;]+)/)?.[1];
+  let next = "/cabinet";
+  if (nextRaw) {
+    const decoded = decodeURIComponent(nextRaw);
+    if (decoded.startsWith("/") && !decoded.startsWith("//")) next = decoded;
+  }
+
+  const res = seeOther(next);
   res.headers.append("Set-Cookie", `sc_session=${signSession(session)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 30}`);
   res.headers.append("Set-Cookie", "sc_oauth_state=; Path=/; Max-Age=0");
+  res.headers.append("Set-Cookie", "sc_next=; Path=/; Max-Age=0");
   return res;
 }

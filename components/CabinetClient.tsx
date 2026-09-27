@@ -63,12 +63,22 @@ export default function CabinetClient({ login, displayName, avatar, token: initi
     <div>
       <div className="flex items-center justify-between mb-2">
         <span className="text-sm text-gray-500 uppercase tracking-wide">{title}</span>
-        <button
-          onClick={() => copy(url, key)}
-          className="text-xs px-2 py-1 bg-border hover:bg-gray-600 text-gray-300 rounded transition-colors"
-        >
-          {copied === key ? "Скопировано ✓" : "Копировать"}
-        </button>
+        <div className="flex items-center gap-1">
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs px-2 py-1 bg-border hover:bg-gray-600 text-gray-300 rounded transition-colors"
+          >
+            Перейти ↗
+          </a>
+          <button
+            onClick={() => copy(url, key)}
+            className="text-xs px-2 py-1 bg-border hover:bg-gray-600 text-gray-300 rounded transition-colors"
+          >
+            {copied === key ? "Скопировано ✓" : "Копировать"}
+          </button>
+        </div>
       </div>
       <pre className="bg-panel border border-border rounded-lg p-3 text-sm text-gray-300 overflow-x-auto whitespace-pre-wrap break-all">{url}</pre>
     </div>
@@ -115,7 +125,7 @@ export default function CabinetClient({ login, displayName, avatar, token: initi
               Ссылки привязаны к аккаунту <span className="text-gray-400">{login}</span>.
             </p>
             {linkBlock("Панель для модераторов", links.panel, "panel")}
-            {linkBlock("Оверлей для OBS (Browser Source, 1920×1080)", links.overlay, "overlay")}
+            {linkBlock("Оверлей для OBS", links.overlay, "overlay")}
             <button
               onClick={generate}
               disabled={busy}
