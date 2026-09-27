@@ -252,8 +252,81 @@ export default function PanelClient({ channel, room }: { channel?: string | null
     if (selectedId !== interactiveIframeId) setInteractiveIframeId(null);
   }, [selectedId, interactiveIframeId]);
 
+  // Twitch-плеер превью через официальный SDK: URL-параметры автозапуска у плеера
+  // ненадёжны (браузер блокирует play() до применения мьюта — плеер остаётся на паузе),
+  // поэтому после READY/PAUSE/OFFLINE→ONLINE принудительно запускаем воспроизведение
+  const twitchPreviewRef = useRef<HTMLDivElement | null>(null);
+  const twitchPlayerRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (!previewOn || !channel || !mounted) return;
+    const target = twitchPreviewRef.current;
+    if (!target) return;
+    let cancelled = false;
+
+    const boot = () => {
+      if (cancelled) return;
+      const Tw = (window as any).Twitch;
+      if (!Tw?.Player || !twitchPreviewRef.current) return;
+      let resumeAttempts = 0;
+      const player = new Tw.Player("twitch-preview", {
+        width: "100%",
+        height: "100%",
+        channel,
+        parent: parentHost,
+        autoplay: true,
+        muted: true,
+      });
+      twitchPlayerRef.current = player;
+      const resume = () => {
+        try {
+          if (player.getMuted?.() === false) player.setMuted(true);
+          player.play();
+        } catch {}
+      };
+      player.addEventListener(Tw.Player.READY, () => setTimeout(resume, 200));
+      player.addEventListener(Tw.Player.PLAY, () => { resumeAttempts = 0; });
+      player.addEventListener(Tw.Player.PAUSE, () => {
+        // авто-возобновление (до 3 попыток), чтобы браузерная блокировка автозапуска не оставляла плеер на паузе
+        if (resumeAttempts >= 3) return;
+        resumeAttempts += 1;
+        setTimeout(resume, 600);
+      });
+      player.addEventListener(Tw.Player.ONLINE, resume);
+      // страховка от пропущенных событий: первые ~15 секунд периодически подтягиваем play()
+      // (play() на уже играющем плеере — no-op)
+      let tries = 0;
+      const iv = setInterval(() => {
+        tries += 1;
+        if (cancelled || tries > 8) { clearInterval(iv); return; }
+        resume();
+      }, 2000);
+    };
+
+    if ((window as any).Twitch?.Player) {
+      boot();
+    } else {
+      const existing = document.querySelector<HTMLScriptElement>('script[src*="embed.twitch.tv"]');
+      if (!existing) {
+        const s = document.createElement("script");
+        s.src = "https://embed.twitch.tv/embed/v1.js";
+        s.async = true;
+        s.onload = boot;
+        document.body.appendChild(s);
+      } else {
+        existing.addEventListener("load", boot, { once: true });
+      }
+    }
+
+    return () => {
+      cancelled = true;
+      twitchPlayerRef.current = null;
+      if (twitchPreviewRef.current) twitchPreviewRef.current.innerHTML = "";
+    };
+  }, [previewOn, channel, mounted, previewKey, parentHost]);
+
   // автоподгрузка стрима: если плеер был загружен в оффлайне, при выходе в эфир он остаётся
-  // «на паузе» — по переходу offline→online перезагружаем плеер (сменив key у iframe)
+  // «на паузе» — по переходу offline→online перезагружаем плеер (сменив key у контейнера)
   useEffect(() => {
     if (!previewOn || !channel) return;
     let stopped = false;
@@ -871,13 +944,11 @@ export default function PanelClient({ channel, room }: { channel?: string | null
                   style={{ left: 0, top: 0, width: state.canvasW, height: state.canvasH }}>
                   <div className="absolute inset-0 opacity-10" style={{ backgroundImage: "linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)", backgroundSize: "40px 40px" }} />
                   {mounted && previewOn && channel && (
-                    <iframe
+                    <div
                       key={previewKey}
-                      src={`https://player.twitch.tv/?channel=${encodeURIComponent(channel)}&parent=${parentHost}&muted=true&autoplay=true`}
-                      title="Превью стрима Twitch"
-                      className="absolute inset-0 w-full h-full rounded-md"
-                      style={{ border: 0 }}
-                      allow="autoplay; fullscreen"
+                      ref={twitchPreviewRef}
+                      id="twitch-preview"
+                      className="absolute inset-0 overflow-hidden rounded-md"
                     />
                   )}
                 </div>
