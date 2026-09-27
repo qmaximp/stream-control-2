@@ -180,6 +180,8 @@ function OverlayElement({ el }: { el: StreamElement }) {
 		zIndex: el.zIndex,
 		visibility: el.visible ? 'visible' : 'hidden',
 		opacity: el.opacity ?? 1,
+		transform: `${el.rotation ? `rotate(${el.rotation}deg)` : ''}${el.flipH || el.flipV ? ` scale(${el.flipH ? -1 : 1}, ${el.flipV ? -1 : 1})` : ''}` || undefined,
+		transformOrigin: 'center',
 	}
 
 	if (el.type === 'image' || el.type === 'gif')

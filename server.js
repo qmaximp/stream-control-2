@@ -79,12 +79,20 @@ app.prepare().then(() => {
     socket.on('element:reorder', ({ id, direction }) => {
       const idx = state.elements.findIndex(e => e.id === id);
       if (idx < 0) return;
-      const swap = direction === 'up' ? idx + 1 : idx - 1;
-      if (swap < 0 || swap >= state.elements.length) return;
-      const zi = state.elements[idx].zIndex;
-      state.elements[idx].zIndex = state.elements[swap].zIndex;
-      state.elements[swap].zIndex = zi;
-      io.emit('element:zorder', state.elements.map(e => e.id));
+      if (direction === 'front' || direction === 'back') {
+        // прыжок на самый верх/низ с нормализацией zIndex в 0..n-1
+        const zis = state.elements.map(e => e.zIndex);
+        state.elements[idx].zIndex = direction === 'front' ? Math.max(...zis) + 1 : Math.min(...zis) - 1;
+        state.elements.slice().sort((a, b) => a.zIndex - b.zIndex).forEach((e, i) => { e.zIndex = i; });
+      } else {
+        const swap = direction === 'up' ? idx + 1 : idx - 1;
+        if (swap < 0 || swap >= state.elements.length) return;
+        const zi = state.elements[idx].zIndex;
+        state.elements[idx].zIndex = state.elements[swap].zIndex;
+        state.elements[swap].zIndex = zi;
+      }
+      // рассылаем порядок именно по слоям, а не по порядку вставки
+      io.emit('element:zorder', state.elements.slice().sort((a, b) => a.zIndex - b.zIndex).map(e => e.id));
     });
 
     socket.on('element:toggle-visible', (id) => {

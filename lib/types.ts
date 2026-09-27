@@ -14,6 +14,9 @@ export interface StreamElement {
   fontWeight?: string;
   bgColor?: string;
   opacity?: number;
+  rotation?: number;
+  flipH?: boolean;
+  flipV?: boolean;
   duration?: number;
   timerDirection?: 'up' | 'down';
   startTime?: number | null;

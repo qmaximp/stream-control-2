@@ -209,6 +209,44 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
 
   const selected = state.elements.find((e) => e.id === selectedId) || null;
 
+  const rotateRef = useRef<{ el: StreamElement; cx: number; cy: number; startAngle: number; startRotation: number } | null>(null);
+
+  const handleRotateStart = useCallback((e: React.MouseEvent, el: StreamElement) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!viewportRef.current) return;
+    const rect = viewportRef.current.getBoundingClientRect();
+    const { x: vx, y: vy, s } = viewRef.current;
+    // центр элемента в экранных координатах — вокруг него и вращаем
+    const cx = rect.left + vx + (el.x + el.width / 2) * s;
+    const cy = rect.top + vy + (el.y + el.height / 2) * s;
+    rotateRef.current = {
+      el, cx, cy,
+      startAngle: (Math.atan2(e.clientY - cy, e.clientX - cx) * 180) / Math.PI,
+      startRotation: el.rotation ?? 0,
+    };
+  }, []);
+
+  const handleRotateMove = useCallback((e: MouseEvent) => {
+    const r = rotateRef.current;
+    if (!r) return;
+    const cur = (Math.atan2(e.clientY - r.cy, e.clientX - r.cx) * 180) / Math.PI;
+    let rot = r.startRotation + (cur - r.startAngle);
+    if (e.shiftKey) rot = Math.round(rot / 15) * 15; // шаг 15° с зажатым Shift
+    else rot = Math.round(rot);
+    updateElement(r.el.id, { rotation: rot });
+  }, [updateElement]);
+
+  useEffect(() => {
+    const fn = () => { rotateRef.current = null; };
+    window.addEventListener("mouseup", fn);
+    window.addEventListener("mousemove", handleRotateMove);
+    return () => {
+      window.removeEventListener("mouseup", fn);
+      window.removeEventListener("mousemove", handleRotateMove);
+    };
+  }, [handleRotateMove]);
+
   const parkingSpot = () => ({ x: 0, y: 1200 });
 
   const openEmotePicker = useCallback(async () => {
@@ -621,17 +659,20 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
                   const hs = 10 / view.s;
                   return (
                       <div key={el.id} onMouseDown={(e) => handleDragStart(e, el)}
-                        className={`absolute select-none ${el.locked ? "" : "cursor-grab"}`}
+                        className={`absolute select-none group ${el.locked ? "" : "cursor-grab"}`}
                         style={{
                         left: el.x, top: el.y, width: el.width, height: el.height,
                           zIndex: el.zIndex, opacity: el.visible ? Math.max(el.opacity ?? 1, 0.08) : 0.35,
                         outline: selectedId === el.id ? `${2 / view.s}px solid rgb(var(--c-accent2))` : undefined,
+                        transform: `${el.rotation ? `rotate(${el.rotation}deg)` : ""}${el.flipH || el.flipV ? ` scale(${el.flipH ? -1 : 1}, ${el.flipV ? -1 : 1})` : ""}` || undefined,
                       }}>
                         <PreviewElement el={el} scale={1} interactive={interactiveIframeId === el.id} />
+                        {/* слой ручек: контр-зеркалится, чтобы при flipH/flipV ручки не переворачивались вместе с элементом */}
+                        <div className="absolute inset-0 pointer-events-none" style={{ transform: `scale(${el.flipH ? -1 : 1}, ${el.flipV ? -1 : 1})` }}>
                         {selectedId === el.id && !el.locked && (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => {
                         const cursors: Record<string, string> = { n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize", ne: "nesw-resize", sw: "nesw-resize", nw: "nwse-resize", se: "nwse-resize" };
                         const pos: React.CSSProperties = {
-                          position: "absolute", width: hs, height: hs,
+                          position: "absolute", width: hs, height: hs, pointerEvents: "auto",
                           background: "rgb(var(--c-accent2))", border: `${2 / view.s}px solid #fff`,
                           borderRadius: 2, cursor: cursors[dir],
                         };
@@ -647,9 +688,9 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
                       })}
                       {el.type === "iframe" && selectedId === el.id && !el.locked && (
                         <div onMouseDown={(e) => { e.stopPropagation(); handleDragStart(e, el); }}
-                          className="absolute flex items-center justify-center rounded-full"
+                          className="absolute flex items-center justify-center rounded-full pointer-events-auto"
                           style={{
-                            left: `calc(50% - ${11 / view.s}px)`, top: -32 / view.s,
+                            left: `calc(50% - ${11 / view.s}px)`, top: -60 / view.s,
                             width: 22 / view.s, height: 22 / view.s, background: "rgb(var(--c-accent2))",
                             border: `${2 / view.s}px solid #fff`, cursor: "move",
                             boxShadow: "0 1px 6px rgba(0,0,0,.5)",
@@ -662,6 +703,26 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
                           </svg>
                         </div>
                       )}
+                      {!el.locked && (
+                        <div
+                          onMouseDown={(e) => handleRotateStart(e, el)}
+                          title="Повернуть (Shift — шаг 15°)"
+                          className={`absolute rounded-full flex items-center justify-center transition-opacity pointer-events-auto ${selectedId === el.id ? "" : "opacity-0 group-hover:opacity-100"}`}
+                          style={{
+                            left: `calc(50% - ${11 / view.s}px)`, top: -32 / view.s,
+                            width: 22 / view.s, height: 22 / view.s, background: "rgb(var(--c-accent))",
+                            border: `${2 / view.s}px solid #fff`, cursor: "grab",
+                            boxShadow: "0 1px 6px rgba(0,0,0,.5)",
+                          }}
+                        >
+                          <svg width={(12 / view.s)} height={(12 / view.s)} viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round"
+                            style={{ transform: `rotate(${-(el.rotation ?? 0)}deg)` }}>
+                            <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                            <path d="M21 3v6h-6" />
+                          </svg>
+                        </div>
+                      )}
+                        </div>
                     </div>
                   );
                 })}
@@ -856,9 +917,23 @@ function PropertyEditor({ el, update, emit }: { el: StreamElement; update: (part
         <NumberField label="Ширина" value={el.width} onChange={(v) => update({ width: v })} />
         <NumberField label="Высота" value={el.height} onChange={(v) => update({ height: v })} />
       </div>
+      <div className="grid grid-cols-2 gap-2 items-end">
+        <NumberField label="Поворот (°)" value={el.rotation ?? 0} onChange={(v) => update({ rotation: ((v % 360) + 360) % 360 })} />
+        <button onClick={() => update({ rotation: 0 })} className="px-2 py-1.5 text-xs bg-border hover:bg-gray-600 rounded-lg">⟲ Сброс</button>
+      </div>
       <div className="flex gap-2">
         <button onClick={() => emit("element:reorder", { id: el.id, direction: "up" })} className="flex-1 px-2 py-1.5 text-xs bg-border hover:bg-gray-600 rounded-lg">↑ Вперёд</button>
         <button onClick={() => emit("element:reorder", { id: el.id, direction: "down" })} className="flex-1 px-2 py-1.5 text-xs bg-border hover:bg-gray-600 rounded-lg">↓ Назад</button>
+      </div>
+      <div className="flex gap-2">
+        <button onClick={() => emit("element:reorder", { id: el.id, direction: "front" })} className="flex-1 px-2 py-1.5 text-xs bg-border hover:bg-gray-600 rounded-lg">⤒ На самый верх</button>
+        <button onClick={() => emit("element:reorder", { id: el.id, direction: "back" })} className="flex-1 px-2 py-1.5 text-xs bg-border hover:bg-gray-600 rounded-lg">⤓ На самый низ</button>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <button onClick={() => update({ flipH: !el.flipH })}
+          className={`px-2 py-1.5 text-xs rounded-lg transition-colors ${el.flipH ? "bg-accent text-white" : "bg-border hover:bg-gray-600"}`}>⇋ Отразить ↔</button>
+        <button onClick={() => update({ flipV: !el.flipV })}
+          className={`px-2 py-1.5 text-xs rounded-lg transition-colors ${el.flipV ? "bg-accent text-white" : "bg-border hover:bg-gray-600"}`}>⇅ Отразить ↕</button>
       </div>
       <button onClick={() => emit("element:add", { ...el, id: undefined, zIndex: undefined, locked: false, x: el.x + 30, y: el.y + 30 })}
         className="w-full px-3 py-2 bg-border hover:bg-gray-600 text-white text-sm rounded-lg">⧉ Дублировать элемент</button>
