@@ -136,6 +136,18 @@ export default function CabinetClient({ login, displayName, avatar, token: initi
           </div>
         )}
       </div>
+
+      <footer className="max-w-3xl mx-auto px-6 pb-12 text-center">
+        <a
+          href="https://dalink.to/jettle_"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-2 px-6 py-3 rounded-full border border-border bg-panel hover:bg-border text-gray-200 text-sm font-medium transition-all hover:-translate-y-0.5"
+        >
+          💜 Поддержать проект
+        </a>
+        <p className="text-[11px] text-gray-600 mt-3">Ovrly развивается бесплатно — поддержка очень помогает</p>
+      </footer>
     </main>
   );
 }

@@ -36,6 +36,15 @@ export default function Home({ searchParams }: { searchParams?: { error?: string
         </svg>
         Войти через Twitch
       </a>
+
+      <a
+        href="https://dalink.to/jettle_"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="mt-4 inline-flex items-center gap-2 px-6 py-3 rounded-full border border-border bg-panel hover:bg-border text-gray-200 text-sm font-medium transition-all hover:-translate-y-0.5"
+      >
+        💜 Поддержать проект
+      </a>
     </main>
   );
 }

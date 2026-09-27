@@ -102,3 +102,27 @@ html.light .text-red-400 { color: #dc2626; }
 html.light .bg-red-400 { background: #ef4444; }
 html.light .hover\:bg-red-950\/40:hover { background: rgba(248, 113, 113, 0.15); }
 html.light .border-red-900\/50 { border-color: rgba(220, 38, 38, 0.3); }
+
+/* Появление всплывающих меню/шитов (мобильный бургер, шит добавления) */
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(8px) scale(.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.pop-in { animation: pop-in .18s cubic-bezier(.2, .8, .3, 1) both; }
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.fade-in { animation: fade-in .15s ease-out both; }
+
+/* Исчезновение всплывающих меню/шитов — плавное закрытие бургера и шитов */
+@keyframes pop-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(8px) scale(.96); }
+}
+.pop-out { animation: pop-out .18s cubic-bezier(.4, 0, .8, .6) both; }
+@keyframes fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+.fade-out { animation: fade-out .15s ease-out both; }

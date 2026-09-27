@@ -6,6 +6,12 @@ export function withAutoplay(url: string, on?: boolean): string {
   return url + (url.includes("?") ? "&" : "?") + "autoplay=1";
 }
 
+// embed-плеер YouTube стартует без звука: звук включается вручную в самом iframe
+export function withMuted(url: string): string {
+  if (!/youtube(-nocookie)?\.com\/embed\//.test(url)) return url;
+  return url + (url.includes("?") ? "&" : "?") + "mute=1";
+}
+
 export function toEmbedUrl(raw: string): string {
   let url = (raw || "").trim();
   if (!url) return "";

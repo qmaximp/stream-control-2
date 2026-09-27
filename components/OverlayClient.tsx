@@ -2,8 +2,9 @@
 
 import type { StreamElement, SyncState } from '@/lib/types'
 import { useEffect, useRef, useState } from 'react'
-import { toEmbedUrl, withAutoplay } from '@/lib/embed'
+import { toEmbedUrl, withAutoplay, withMuted } from '@/lib/embed'
 import { playFinishSound } from '@/lib/sound'
+import { noteServerClock, serverClockLag } from '@/lib/clock'
 import { io as ioInit } from 'socket.io-client'
 
 // iframe-плееры по id элемента: сюда приходят команды из панели
@@ -11,7 +12,7 @@ const iframeRefs = new Map<string, HTMLIFrameElement>()
 const playerTimes = new Map<string, { t: number; st: number }>()
 const seekTargets = new Map<string, number>()
 
-export default function OverlayClient() {
+export default function OverlayClient({ room }: { room?: string | null }) {
 	const [state, setState] = useState<SyncState>({
 		elements: [],
 		canvasW: 1920,
@@ -21,17 +22,18 @@ export default function OverlayClient() {
 	const [scale, setScale] = useState(1)
 
 	useEffect(() => {
-		const socket = ioInit({ transports: ['websocket', 'polling'] })
+		const socket = ioInit({ transports: ['websocket', 'polling'], query: { room: room || 'default' } })
 		socket.on('state:init', (s: SyncState) => setState(s))
 		socket.on('element:added', (el: StreamElement) =>
 			setState(p => ({ ...p, elements: [...p.elements, el] })),
 		)
-		socket.on('element:updated', (el: StreamElement) =>
+		socket.on('element:updated', (el: StreamElement) => {
+			noteServerClock(el)
 			setState(p => ({
 				...p,
 				elements: p.elements.map(e => (e.id === el.id ? { ...e, ...el } : e)),
-			})),
-		)
+			}))
+		})
 		socket.on('element:moved', (d: { id: string; x: number; y: number }) =>
 			setState(p => ({
 				...p,
@@ -63,8 +65,15 @@ export default function OverlayClient() {
 		// команды плееру из панели (пуск/пауза/громкость) — через YouTube postMessage API
 		socket.on('element:command', ({ id, cmd, value }: { id: string; cmd: string; value?: number }) => {
 			if (cmd === 'time') {
-				// целевая позиция из превью — оверлей подтянется при дрейфе
+				// целевая позиция из превью: подтягиваемся сразу при расхождении > 2с —
+				// даже на паузе, иначе перемотка в панели не доезжает до оверлея
 				seekTargets.set(id, value ?? 0)
+				const f = iframeRefs.get(id)
+				const cur = playerTimes.get(id)
+				if (f?.contentWindow && cur && Math.abs(cur.t - (value ?? 0)) > 2) {
+					f.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [value ?? 0, true] }), '*')
+					playerTimes.set(id, { t: value ?? 0, st: cur.st })
+				}
 				return
 			}
 			const f = iframeRefs.get(id)
@@ -212,7 +221,7 @@ function OverlayElement({ el }: { el: StreamElement }) {
 		return (
 			<div style={style}>
 				<iframe
-					src={withAutoplay(toEmbedUrl(el.src || ''), el.autoplay)}
+					src={withMuted(withAutoplay(toEmbedUrl(el.src || ''), el.autoplay))}
 					title='embed'
 					ref={(f) => {
 						if (f) iframeRefs.set(el.id, f)
@@ -247,7 +256,7 @@ function OverlayElement({ el }: { el: StreamElement }) {
 	if (el.type === 'timer') {
 		const elapsedMs =
 			el.isRunning && el.startTime
-				? Date.now() - el.startTime
+				? Math.max(0, Date.now() - serverClockLag.ms - el.startTime) // синхрон между устройствами с разошедшимися часами
 				: (el.elapsed || 0)
 		const elapsedSec = Math.floor(elapsedMs / 1000)
 		const display =

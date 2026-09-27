@@ -7,18 +7,19 @@ export const dynamic = "force-dynamic";
 
 export default function Panel({ searchParams }: { searchParams?: { room?: string } }) {
   const room = searchParams?.room;
-  if (!isValidRoomToken(room)) {
+  // чистая ссылка /panel закрыта: панель открывается только по персональной ссылке с токеном комнаты
+  if (!room || !isValidRoomToken(room)) {
     return invalidLinkScreen();
   }
   const session = verifySession(cookies().get("sc_session")?.value);
   // доступ только для зарегистрированных через Twitch — даже по персональной ссылке;
   // после входа вернём модератора на эту же ссылку
-  if (!session) return notRegisteredScreen(room ? `/panel?room=${encodeURIComponent(room)}` : "/panel");
+  if (!session) return notRegisteredScreen(`/panel?room=${encodeURIComponent(room)}`);
 
   // канал для превью/смайликов: аккаунт, чья персональная ссылка открыта,
   // иначе владелец панели, иначе единственный зарегистрировавшийся, иначе залогиненный
   let channel: string | null = null;
-  if (room) {
+  {
     const entry = Object.entries(readLinks()).find(([, e]) => e.token === room);
     if (entry) channel = entry[0];
   }
@@ -28,5 +29,5 @@ export default function Panel({ searchParams }: { searchParams?: { room?: string
     if (logins.length === 1) channel = logins[0];
   }
   if (!channel) channel = session?.login ?? null;
-  return <PanelClient channel={channel} />;
+  return <PanelClient channel={channel} room={room} />;
 }

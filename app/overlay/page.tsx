@@ -7,5 +7,5 @@ export default function Overlay({ searchParams }: { searchParams?: { room?: stri
   if (!isValidRoomToken(searchParams?.room)) {
     return invalidLinkScreen();
   }
-  return <OverlayClient />;
+  return <OverlayClient room={searchParams?.room} />;
 }

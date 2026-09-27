@@ -19,27 +19,52 @@ app.prepare().then(() => {
     maxHttpBufferSize: 50 * 1024 * 1024,
   });
 
-  const state = {
-    elements: [],
-    canvasW: CANVAS_W,
-    canvasH: CANVAS_H,
-  };
+  // комнаты: у каждой ссылки (?room=токен) своё независимое состояние;
+  // прямой доступ без ?room= попадает в общую комнату "default"
+  const rooms = new Map(); // key -> { state: {elements, canvasW, canvasH}, lastActivity: number }
 
-  // автоочистка: если 12 часов никто не менял состояние — элементы стираются
-  const IDLE_CLEAR_MS = 12 * 60 * 60 * 1000;
-  let lastActivity = Date.now();
+  function getRoom(key) {
+    let r = rooms.get(key);
+    if (!r) {
+      r = {
+        state: { elements: [], canvasW: CANVAS_W, canvasH: CANVAS_H },
+        lastActivity: Date.now(),
+      };
+      rooms.set(key, r);
+    }
+    return r;
+  }
+
+  // автоочистка: 3 часа без изменений — элементы стираются (даже если вкладки открыты);
+  // комната совсем без подключений удаляется через 12 часов
+  const IDLE_CLEAR_MS = 3 * 60 * 60 * 1000;
+  const ROOM_DELETE_MS = 12 * 60 * 60 * 1000;
   setInterval(() => {
-    if (state.elements.length > 0 && Date.now() - lastActivity > IDLE_CLEAR_MS) {
-      state.elements = [];
-      io.emit('elements:cleared');
-      console.log('[ovrly] элементы очищены: 12 часов без изменений');
+    const now = Date.now();
+    for (const [key, r] of rooms) {
+      if (r.state.elements.length > 0 && now - r.lastActivity > IDLE_CLEAR_MS) {
+        r.state.elements = [];
+        io.to(key).emit('elements:cleared');
+        console.log('[ovrly] элементы очищены: 3 часа без изменений —', key.slice(0, 12));
+      }
+      const sockets = io.sockets.adapter.rooms.get(key);
+      if ((!sockets || sockets.size === 0) && now - r.lastActivity > ROOM_DELETE_MS) {
+        rooms.delete(key);
+        console.log('[ovrly] комната удалена: 12 часов без подключений —', key.slice(0, 12));
+      }
     }
   }, 60 * 1000);
 
   io.on('connection', (socket) => {
+    // комната из handshake (?room=токен), иначе общая default-комната
+    const room = ((socket.handshake.query.room || 'default') + '').slice(0, 64);
+    socket.join(room);
+    const roomRec = getRoom(room);
+    const state = roomRec.state;
+
     // любое событие от клиента считается активностью и отодвигает автоочистку
     socket.use((event, next) => {
-      lastActivity = Date.now();
+      roomRec.lastActivity = Date.now();
       next();
     });
 
@@ -48,7 +73,7 @@ app.prepare().then(() => {
     socket.on('canvas:resize', (dims) => {
       state.canvasW = dims.w;
       state.canvasH = dims.h;
-      io.emit('canvas:resize', dims);
+      io.to(room).emit('canvas:resize', dims);
     });
 
     socket.on('element:add', (el) => {
@@ -56,14 +81,14 @@ app.prepare().then(() => {
       el.zIndex = el.zIndex ?? state.elements.length;
       el.visible = el.visible ?? true;
       state.elements.push(el);
-      io.emit('element:added', el);
+      io.to(room).emit('element:added', el);
     });
 
     socket.on('element:update', (partial) => {
       const idx = state.elements.findIndex(e => e.id === partial.id);
       if (idx >= 0) {
         state.elements[idx] = { ...state.elements[idx], ...partial };
-        socket.broadcast.emit('element:updated', state.elements[idx]);
+        socket.broadcast.to(room).emit('element:updated', state.elements[idx]);
       }
     });
 
@@ -72,7 +97,7 @@ app.prepare().then(() => {
       if (idx >= 0) {
         state.elements[idx].x = data.x;
         state.elements[idx].y = data.y;
-        socket.broadcast.emit('element:moved', data);
+        socket.broadcast.to(room).emit('element:moved', data);
       }
     });
 
@@ -84,13 +109,13 @@ app.prepare().then(() => {
         if (data.y !== undefined) el.y = data.y;
         el.width = data.width;
         el.height = data.height;
-        socket.broadcast.emit('element:resized', data);
+        socket.broadcast.to(room).emit('element:resized', data);
       }
     });
 
     socket.on('element:delete', (id) => {
       state.elements = state.elements.filter(e => e.id !== id);
-      io.emit('element:deleted', id);
+      io.to(room).emit('element:deleted', id);
     });
 
     socket.on('element:reorder', ({ id, direction }) => {
@@ -109,14 +134,14 @@ app.prepare().then(() => {
         state.elements[swap].zIndex = zi;
       }
       // рассылаем порядок именно по слоям, а не по порядку вставки
-      io.emit('element:zorder', state.elements.slice().sort((a, b) => a.zIndex - b.zIndex).map(e => e.id));
+      io.to(room).emit('element:zorder', state.elements.slice().sort((a, b) => a.zIndex - b.zIndex).map(e => e.id));
     });
 
     socket.on('element:toggle-visible', (id) => {
       const idx = state.elements.findIndex(e => e.id === id);
       if (idx >= 0) {
         state.elements[idx].visible = !state.elements[idx].visible;
-        socket.broadcast.emit('element:updated', state.elements[idx]);
+        socket.broadcast.to(room).emit('element:updated', state.elements[idx]);
       }
     });
 
@@ -131,7 +156,7 @@ app.prepare().then(() => {
         }
         el.startTime = Date.now() - elapsed;
         el.isRunning = true;
-        io.emit('element:updated', el);
+        io.to(room).emit('element:updated', el);
       }
     });
 
@@ -143,7 +168,7 @@ app.prepare().then(() => {
           el.elapsed = Date.now() - el.startTime;
         }
         el.isRunning = false;
-        io.emit('element:updated', el);
+        io.to(room).emit('element:updated', el);
       }
     });
 
@@ -153,17 +178,17 @@ app.prepare().then(() => {
         state.elements[idx].isRunning = false;
         state.elements[idx].startTime = null;
         state.elements[idx].elapsed = 0;
-        io.emit('element:updated', state.elements[idx]);
+        io.to(room).emit('element:updated', state.elements[idx]);
       }
     });
 
     socket.on('element:command', (data) => {
-      socket.broadcast.emit('element:command', data);
+      socket.broadcast.to(room).emit('element:command', data);
     });
 
     socket.on('elements:clear', () => {
       state.elements = [];
-      io.emit('elements:cleared');
+      io.to(room).emit('elements:cleared');
     });
   });
 

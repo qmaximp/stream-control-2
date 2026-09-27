@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io as ioInit, Socket } from "socket.io-client";
 import type { SyncState, StreamElement } from "@/lib/types";
-import { toEmbedUrl, withAutoplay } from "@/lib/embed";
+import { toEmbedUrl, withAutoplay, withMuted } from "@/lib/embed";
+import { noteServerClock, serverClockLag } from "@/lib/clock";
 import { playFinishSound } from "@/lib/sound";
 import ObsPanel from "@/components/ObsPanel";
 import LogoMark from "@/components/LogoMark";
@@ -13,12 +14,13 @@ const CANVAS_H = 1080;
 
 type Emote = { platform: string; code: string; url: string };
 
-export default function PanelClient({ channel }: { channel?: string | null }) {
+export default function PanelClient({ channel, room }: { channel?: string | null; room?: string | null }) {
   const [state, setState] = useState<SyncState>({ elements: [], canvasW: CANVAS_W, canvasH: CANVAS_H });
   const [connected, setConnected] = useState(false);
   const [tab, setTab] = useState<"elements" | "obs">("elements");
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [previewOn, setPreviewOn] = useState(false);
+  const [previewKey, setPreviewKey] = useState(0);
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
   const parentHost = typeof window !== "undefined" ? window.location.hostname : "localhost";
@@ -31,20 +33,58 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
   const [emoteNotes, setEmoteNotes] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [interactiveIframeId, setInteractiveIframeId] = useState<string | null>(null);
+  const interactiveIframeRef = useRef<string | null>(null);
+  interactiveIframeRef.current = interactiveIframeId;
+  const [addSheet, setAddSheet] = useState<null | "image" | "video">(null);
+  const [addSheetClosing, setAddSheetClosing] = useState(false);
+  const addSheetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const closeAddSheet = () => {
+    if (addSheetTimer.current) clearTimeout(addSheetTimer.current);
+    setAddSheetClosing(true);
+    addSheetTimer.current = setTimeout(() => {
+      addSheetTimer.current = null;
+      setAddSheetClosing(false);
+      setAddSheet(null);
+    }, 180);
+  };
   const socketRef = useRef<Socket | null>(null);
   const [view, setView] = useState({ x: 0, y: 0, s: 0.3 });
   const viewRef = useRef(view);
   viewRef.current = view;
   const [panning, setPanning] = useState(false);
+  const [isCoarse, setIsCoarse] = useState(false);
+  useEffect(() => {
+    setIsCoarse(window.matchMedia?.("(pointer: coarse)").matches || navigator.maxTouchPoints > 0);
+  }, []);
   const viewportRef = useRef<HTMLDivElement>(null);
   const panRef = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
   const baseViewRef = useRef<{ x: number; y: number; s: number } | null>(null);
+  // свежий стейт для колбэков, замороженных useCallback'ом (паркинг считает каскад по актуальным элементам)
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   // мобильные устройства: портрет блокируется экраном «поверни телефон», ландшафт — компактный тулбар
   const [isPortrait, setIsPortrait] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  // плавное закрытие бургера: на время exit-анимации меню остаётся в DOM
+  const [menuClosing, setMenuClosing] = useState(false);
+  const menuCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openBurger = () => {
+    if (menuCloseTimer.current) { clearTimeout(menuCloseTimer.current); menuCloseTimer.current = null; }
+    setMenuClosing(false);
+    setMenuOpen(true);
+  };
+  const closeBurger = () => {
+    if (menuCloseTimer.current) clearTimeout(menuCloseTimer.current);
+    setMenuClosing(true);
+    menuCloseTimer.current = setTimeout(() => {
+      menuCloseTimer.current = null;
+      setMenuClosing(false);
+      setMenuOpen(false);
+    }, 200);
+  };
   const isMobileRef = useRef(false);
   isMobileRef.current = isMobile;
 
@@ -65,7 +105,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
   }, []);
 
   useEffect(() => {
-    const socket = ioInit({ transports: ["websocket", "polling"] });
+    const socket = ioInit({ transports: ["websocket", "polling"], query: { room: room || "default" } });
     socketRef.current = socket;
 
     socket.on("connect", () => setConnected(true));
@@ -74,12 +114,13 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
     socket.on("element:added", (el: StreamElement) =>
       setState((p) => ({ ...p, elements: [...p.elements, el] }))
     );
-    socket.on("element:updated", (el: StreamElement) =>
+    socket.on("element:updated", (el: StreamElement) => {
+      noteServerClock(el);
       setState((p) => ({
         ...p,
         elements: p.elements.map((e) => (e.id === el.id ? { ...e, ...el } : e)),
-      }))
-    );
+      }));
+    });
     socket.on("element:moved", (d: { id: string; x: number; y: number }) =>
       setState((p) => ({
         ...p,
@@ -147,16 +188,18 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
     pendingUpdatesRef.current.set(id, { partial: merged, timer });
   }, [emit]);
 
-  // ретрансляция состояния плеера из превью: что происходит в превью — повторяется в оверлее
+  // ретрансляция состояния плеера из превью: что происходит в превью — повторяется в оверлее.
+  // Ретранслируем ТОЛЬКО активированный (interactive) iframe: иначе две открытые панели
+  // ретранслируют друг друга и плеер на оверлее «дёргается» (плей/пауза/перемотки с двух сторон)
   const previewStateRef = useRef<Map<string, number>>(new Map());
   const lastTimeRelayRef = useRef(0);
 
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
-      const f = document.querySelector('iframe[title="embed"]') as HTMLIFrameElement | null;
-      if (!f || !f.contentWindow || e.source !== f.contentWindow) return;
-      const id = f.getAttribute("data-id");
+      const id = interactiveIframeRef.current;
       if (!id) return;
+      const f = document.querySelector(`iframe[data-id="${id}"]`) as HTMLIFrameElement | null;
+      if (!f || !f.contentWindow || e.source !== f.contentWindow) return;
       try {
         const d = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
         if (!d || d.event !== "infoDelivery" || !d.info) return;
@@ -193,11 +236,13 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
     return () => window.removeEventListener("message", onMsg);
   }, [emit]);
 
-  // handshake: подписываемся на отчёты плеера превью (повторяем — если плеер загрузился позже)
+  // handshake: подписываемся на отчёты плееров превью (повторяем — если плеер загрузился позже).
+  // ВАЖНО: всем embed-iframe, а не только первому — иначе перемотка/плей работают лишь у одного видео
   useEffect(() => {
     const t = setInterval(() => {
-      const f = document.querySelector('iframe[title="embed"]') as HTMLIFrameElement | null;
-      f?.contentWindow?.postMessage(JSON.stringify({ event: "listening", id: 1, channel: "widget" }), "*");
+      document.querySelectorAll('iframe[title="embed"]').forEach((f) => {
+        (f as HTMLIFrameElement).contentWindow?.postMessage(JSON.stringify({ event: "listening", id: 1, channel: "widget" }), "*");
+      });
     }, 5000);
     return () => clearInterval(t);
   }, []);
@@ -206,6 +251,26 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
   useEffect(() => {
     if (selectedId !== interactiveIframeId) setInteractiveIframeId(null);
   }, [selectedId, interactiveIframeId]);
+
+  // автоподгрузка стрима: если плеер был загружен в оффлайне, при выходе в эфир он остаётся
+  // «на паузе» — по переходу offline→online перезагружаем плеер (сменив key у iframe)
+  useEffect(() => {
+    if (!previewOn || !channel) return;
+    let stopped = false;
+    let prev: boolean | null = null;
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/twitch-live?channel=${encodeURIComponent(channel)}`);
+        const j = await res.json();
+        if (stopped || j?.live === null || j?.live === undefined) return;
+        if (prev === false && j.live === true) setPreviewKey((k) => k + 1);
+        prev = j.live;
+      } catch {}
+    };
+    tick();
+    const t = setInterval(tick, 60000);
+    return () => { stopped = true; clearInterval(t); };
+  }, [previewOn, channel]);
 
   const addElement = useCallback(
     (el: Omit<StreamElement, "id" | "zIndex" | "visible">) => {
@@ -274,16 +339,20 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
   }, [handleRotateMove]);
 
   // на телефоне новые элементы появляются в зоне предзагрузки под экраном,
-  // по горизонтали — по центру того, что сейчас видно; на ПК — как раньше (0, 1200)
+  // по горизонтали — по центру того, что сейчас видно; на ПК — как раньше (0, 1200).
+  // Каскад по уже запаркованным: элементы не ложатся в одну точку стопкой
+  // (иначе добавленные подряд два видео неотличимы от «одного загрузившегося»)
   const parkingSpot = (w = 0, h = 0) => {
+    const st = stateRef.current;
+    const k = st.elements.filter((e) => e.y > st.canvasH).length % 8;
     if (isMobileRef.current) {
       const vp = viewportRef.current;
       const { x: vx, s } = viewRef.current;
       const cx = vp ? Math.round((vp.clientWidth / 2 - vx) / s - w / 2) : 0;
-      const x = Math.min(Math.max(cx, -200), Math.max(-200, state.canvasW - 50 - w));
-      return { x, y: state.canvasH + 120 };
+      const x = Math.min(Math.max(cx, -200), Math.max(-200, st.canvasW - 50 - w));
+      return { x: x + k * 40, y: st.canvasH + 120 + k * 24 };
     }
-    return { x: 0, y: 1200 };
+    return { x: k * 40, y: 1200 + k * 24 };
   };
 
   const openEmotePicker = useCallback(async () => {
@@ -340,10 +409,27 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
     input.click();
   }, [addElement]);
 
+  // добавление по ссылке — общее для сайдбара на ПК и мобильного шита
+  const addImageUrl = useCallback(async () => {
+    const url = prompt("Ссылка на картинку:");
+    if (!url) return;
+    const size = await getImageSize(url);
+    const k = Math.min(1, 1280 / Math.max(size.w, size.h));
+    const p = parkingSpot();
+    addElement({ type: "image", src: url, ...p, width: Math.round(size.w * k), height: Math.round(size.h * k), text: "" });
+  }, [addElement]);
+
+  const addVideoUrl = useCallback(() => {
+    const url = prompt("Ссылка на видео (MP4, WebM):");
+    const p = parkingSpot();
+    if (url) addElement({ type: "video", src: url, ...p, width: 480, height: 270, text: "" });
+  }, [addElement]);
+
   const addIframeEl = useCallback(() => {
     const p = parkingSpot(560, 315);
     const url = prompt("Ссылка на сайт или YouTube (например, https://youtube.com/watch?v=...):");
-    if (url) addElement({ type: "iframe", src: url, ...p, width: 560, height: 315, text: "" });
+    // autoplay: видео сразу играет на оверлее (без звука — mute добавляется в embed)
+    if (url) addElement({ type: "iframe", src: url, ...p, width: 560, height: 315, text: "", autoplay: true });
   }, [addElement]);
 
   const addTextEl = useCallback(() => {
@@ -636,31 +722,55 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
           <div className="text-5xl mb-4">📱</div>
           <h1 className="text-lg font-semibold mb-2">Поверните телефон горизонтально</h1>
           <p className="text-sm text-gray-400 mb-5">Панели нужно широкое поле для работы с оверлеем</p>
-          <button onClick={() => setIsPortrait(false)} className="text-sm text-accent2 hover:underline">Продолжить всё равно</button>
         </div>
       </div>
     );
   }
 
+  // пилюля Превью: на ПК и мобильном — закреплена в правом нижнем углу окна превью
+  const previewPill = (
+    <div
+      className="absolute right-4 bottom-3 z-10 flex items-center gap-2 bg-panel border border-border rounded-full pl-3 pr-3 py-1.5 pointer-events-auto"
+      style={{ boxShadow: "0 2px 10px rgba(0,0,0,.25)" }}
+      data-nopan="1"
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <span className="text-xs text-gray-300 select-none">Превью</span>
+      <button
+        onClick={() => setPreviewOn((v) => !v)}
+        disabled={!channel}
+        title={channel ? "Стрим Twitch в превью холста" : "Вход не выполнен: превью доступно после входа через Twitch"}
+        className={`w-9 h-5 rounded-full transition-colors shrink-0 relative ${previewOn ? "bg-green-500" : "bg-gray-600"} ${channel ? "" : "opacity-50 cursor-not-allowed"}`}
+      >
+        <span className="absolute top-[2px] w-4 h-4 bg-white rounded-full transition-all" style={{ left: previewOn ? 18 : 2 }} />
+      </button>
+    </div>
+  );
+
   return (
     <div className="h-[100dvh] overflow-hidden flex flex-col bg-bg">
       <header className={`flex items-center gap-3 bg-panel border-b border-border ${isMobile ? "px-3 py-2" : "px-5 py-3"}`}>
         {isMobile && (
-          <button onClick={() => setMenuOpen(v => !v)} aria-label="Меню"
+          <button onClick={() => (menuOpen && !menuClosing ? closeBurger() : openBurger())} aria-label="Меню"
             className="w-9 h-9 rounded-lg bg-border hover:bg-gray-600 flex flex-col items-center justify-center gap-[3px] shrink-0">
             <span className="block w-4 h-[2px] bg-gray-300 rounded" />
             <span className="block w-4 h-[2px] bg-gray-300 rounded" />
             <span className="block w-4 h-[2px] bg-gray-300 rounded" />
           </button>
         )}
-        <div className="flex items-center gap-2">
+        <a href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
           <LogoMark size={isMobile ? 28 : 36} />
           <div>
             <h1 className={`${isMobile ? "text-sm" : "text-base"} font-semibold leading-tight`}>Ovrly</h1>
             <p className={`${isMobile ? "text-[10px]" : "text-xs"} text-gray-500 leading-tight`}>Панель модератора</p>
           </div>
-        </div>
+        </a>
         <div className="flex-1" />
+        {isMobile && (
+          <span className="text-right text-[10px] text-gray-500 leading-tight max-w-[40vw]">
+            Элементы удаляются через 3 часа без изменений
+          </span>
+        )}
         <div className={`flex items-center gap-3 ${isMobile ? "hidden" : ""}`}>
           <button onClick={() => applyTheme(theme === "dark" ? "light" : "dark")}
             title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
@@ -672,7 +782,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
             <span className={`w-2 h-2 rounded-full ${connected ? "bg-green-400" : "bg-red-400"}`} />
             {connected ? "Сервер: онлайн" : "Сервер: оффлайн"}
           </span>
-          <a href="/overlay" target="_blank" className="text-sm text-accent2 hover:underline">Открыть оверлей ↗</a>
+          <a href="https://dalink.to/jettle_" target="_blank" rel="noopener noreferrer" className="text-sm text-accent2 hover:underline">Поддержать проект ❤️</a>
         </div>
       </header>
 
@@ -694,22 +804,11 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
             <div className="space-y-2">
               <div className="flex gap-2">
                 <button onClick={addImagePC} className="flex-1 px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🖼 С ПК</button>
-                <button onClick={async () => {
-                  const url = prompt("Ссылка на картинку:");
-                  if (!url) return;
-                  const size = await getImageSize(url);
-                  const k = Math.min(1, 1280 / Math.max(size.w, size.h));
-                  const p = parkingSpot();
-                  addElement({ type: "image", src: url, ...p, width: Math.round(size.w * k), height: Math.round(size.h * k), text: "" });
-                }} className="flex-1 px-3 py-2 bg-border hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">🔗 URL</button>
+                <button onClick={addImageUrl} className="flex-1 px-3 py-2 bg-border hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">🔗 URL</button>
               </div>
               <div className="flex gap-2">
                 <button onClick={addVideoPC} className="flex-1 px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🎬 С ПК</button>
-                <button onClick={() => {
-                  const url = prompt("Ссылка на видео (MP4, WebM):");
-                  const p = parkingSpot();
-                  if (url) addElement({ type: "video", src: url, ...p, width: 480, height: 270, text: "" });
-                }} className="flex-1 px-3 py-2 bg-border hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">🔗 URL</button>
+                <button onClick={addVideoUrl} className="flex-1 px-3 py-2 bg-border hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">🔗 URL</button>
               </div>
               <button onClick={openEmotePicker} className="w-full px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">😀 Добавить смайлик</button>
               <button onClick={addIframeEl} className="w-full px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🌐 Сайт / YouTube</button>
@@ -773,7 +872,8 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
                   <div className="absolute inset-0 opacity-10" style={{ backgroundImage: "linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)", backgroundSize: "40px 40px" }} />
                   {mounted && previewOn && channel && (
                     <iframe
-                      src={`https://player.twitch.tv/?channel=${encodeURIComponent(channel)}&parent=${parentHost}&muted=true`}
+                      key={previewKey}
+                      src={`https://player.twitch.tv/?channel=${encodeURIComponent(channel)}&parent=${parentHost}&muted=true&autoplay=true`}
                       title="Превью стрима Twitch"
                       className="absolute inset-0 w-full h-full rounded-md"
                       style={{ border: 0 }}
@@ -863,42 +963,52 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
                   );
                 })}
               </div>
-              <div
-                className="absolute right-4 bottom-3 z-10 flex items-center gap-2 bg-panel border border-border rounded-full pl-3 pr-2 py-1.5"
-                style={{ boxShadow: "0 2px 10px rgba(0,0,0,.25)" }}
-                data-nopan="1"
-                onMouseDown={(e) => e.stopPropagation()}
-              >
-                <span className="text-xs text-gray-400 select-none">Превью</span>
-                <button
-                  onClick={() => setPreviewOn((v) => !v)}
-                  disabled={!channel}
-                  title={channel ? "Стрим Twitch в превью холста" : "Вход не выполнен: превью доступно после входа через Twitch"}
-                  className={`w-9 h-5 rounded-full transition-colors shrink-0 relative ${previewOn ? "bg-green-500" : "bg-gray-600"} ${channel ? "" : "opacity-50 cursor-not-allowed"}`}
-                >
-                  <span className="absolute top-[2px] w-4 h-4 bg-white rounded-full transition-all" style={{ left: previewOn ? 18 : 2 }} />
-                </button>
-                <span className={`text-xs font-medium select-none ${previewOn ? "text-green-400" : "text-gray-500"}`}>{previewOn ? "ON" : "OFF"}</span>
-              </div>
-            </div>
-            <div className={`shrink-0 flex items-center gap-2 px-6 pb-3 ${isMobile ? "mb-20" : ""}`}>
-              <button onClick={() => zoomBy(1 / 1.25)} title="Уменьшить"
-                className="w-6 h-6 rounded bg-panel border border-border text-gray-400 hover:text-white flex items-center justify-center text-xs">−</button>
-              <span className="bg-panel border border-border rounded px-2 py-1 text-[10px] text-gray-400">🔍 {Math.round((view.s / (baseViewRef.current?.s ?? view.s)) * 100)}%</span>
-              <button onClick={() => zoomBy(1.25)} title="Увеличить"
-                className="w-6 h-6 rounded bg-panel border border-border text-gray-400 hover:text-white flex items-center justify-center text-xs">+</button>
-              <button onClick={() => { if (baseViewRef.current) setView(baseViewRef.current); }}
-                className="bg-panel border border-border rounded px-2 py-1 text-[10px] text-gray-400 hover:text-white transition-colors">Сбросить</button>
-              <span className="bg-panel border border-border rounded px-2 py-1 text-[10px] text-gray-500">колесо / щипок — зум · палец или зажатое колесо — панорама</span>
+              {previewPill}
+              {isMobile ? (
+                // мобильный: левый нижний угол — «− +» в ряд (шириной с «Сбросить»), «Сбросить» под ними
+                <div className="absolute left-4 bottom-3 z-10 flex flex-col items-stretch gap-1.5" data-nopan="1" onPointerDown={(e) => e.stopPropagation()}>
+                  <div className="flex items-stretch gap-1.5">
+                    <button onClick={() => zoomBy(1 / 1.25)} title="Уменьшить"
+                      className="flex-1 h-6 rounded-md bg-panel border border-border text-gray-400 hover:text-white flex items-center justify-center text-xs">−</button>
+                    <button onClick={() => zoomBy(1.25)} title="Увеличить"
+                      className="flex-1 h-6 rounded-md bg-panel border border-border text-gray-400 hover:text-white flex items-center justify-center text-xs">+</button>
+                  </div>
+                  <button onClick={() => { if (baseViewRef.current) setView(baseViewRef.current); }}
+                    className="h-6 rounded-md bg-panel border border-border px-2 text-[11px] text-gray-400 hover:text-white transition-colors">Сбросить</button>
+                </div>
+              ) : (
+                // ПК: левый нижний угол — процент зума + / − / Сбросить в один ряд, под ними предупреждение об автоочистке
+                <div className="absolute left-4 bottom-3 z-10 flex flex-col items-start gap-1" data-nopan="1" onPointerDown={(e) => e.stopPropagation()}>
+                  <div className="flex items-center gap-1.5">
+                    <span className="flex items-center gap-1.5 bg-panel border border-border rounded-md px-2 py-1 text-[11px] font-medium text-accent2">
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+                        <circle cx="11" cy="11" r="7" />
+                        <line x1="21" y1="21" x2="16.2" y2="16.2" />
+                      </svg>
+                      {Math.round((view.s / (baseViewRef.current?.s ?? view.s)) * 100)}%
+                    </span>
+                    <button onClick={() => zoomBy(1.25)} title="Увеличить"
+                      className="w-6 h-6 rounded-md bg-panel border border-border text-gray-400 hover:text-white flex items-center justify-center text-xs">+</button>
+                    <button onClick={() => zoomBy(1 / 1.25)} title="Уменьшить"
+                      className="w-6 h-6 rounded-md bg-panel border border-border text-gray-400 hover:text-white flex items-center justify-center text-xs">−</button>
+                    <button onClick={() => { if (baseViewRef.current) setView(baseViewRef.current); }}
+                      className="rounded-md bg-panel border border-border px-2 py-1 text-[11px] text-gray-400 hover:text-white transition-colors">Сбросить</button>
+                  </div>
+                  <span className="pl-0.5 text-[10px] text-gray-500" style={{ textShadow: "0 1px 3px rgba(0,0,0,.6)" }}>
+                    Элементы удаляются через 3 часа без изменений
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 
-          {selected && (
-            <aside className={`w-72 shrink-0 bg-panel border-l border-border p-4 overflow-y-auto ${isMobile ? "hidden" : ""}`}>
-              <PropertyEditor el={selected} update={(partial) => updateElement(selected.id, partial)} emit={emit} />
-            </aside>
-          )}
-        </div>
+      {selected && (
+        <aside className={`w-72 shrink-0 bg-panel border-l border-border p-4 overflow-y-auto ${isMobile ? "hidden" : ""}`}>
+          <PropertyEditor el={selected} update={(partial) => updateElement(selected.id, partial)} emit={emit} />
+        </aside>
+      )}
+      </div>
+
       <div className={`flex-1 overflow-auto ${tab === "obs" ? "" : "hidden"}`}>
         <ObsPanel />
       </div>
@@ -906,13 +1016,13 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
       {/* бургер-меню: вкладки, тема, статус */}
       {isMobile && menuOpen && (
         <>
-          <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
-          <div className="fixed top-[60px] left-2 z-50 w-64 bg-panel border border-border rounded-xl p-2 shadow-xl space-y-1">
-            <button onClick={() => { setTab("elements"); setMenuOpen(false); }}
+          <div className={`fixed inset-0 z-40 ${menuClosing ? "fade-out" : "fade-in"}`} onClick={closeBurger} />
+          <div className={`fixed top-[60px] left-2 z-50 w-64 bg-panel border border-border rounded-xl p-2 shadow-xl space-y-1 ${menuClosing ? "pop-out" : "pop-in"}`} style={{ transformOrigin: "top left" }}>
+            <button onClick={() => { setTab("elements"); closeBurger(); }}
               className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors ${tab === "elements" ? "bg-accent text-white" : "text-gray-300 hover:bg-border"}`}>
               Элементы оверлея
             </button>
-            <button onClick={() => { setTab("obs"); setMenuOpen(false); }}
+            <button onClick={() => { setTab("obs"); closeBurger(); }}
               className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors ${tab === "obs" ? "bg-accent text-white" : "text-gray-300 hover:bg-border"}`}>
               Управление OBS
             </button>
@@ -930,24 +1040,48 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
                 Сервер: {connected ? "онлайн" : "оффлайн"}
               </span>
             </div>
-            <a href="/overlay" target="_blank" className="block px-3 py-1.5 text-sm text-accent2 hover:bg-border rounded-lg">Открыть оверлей ↗</a>
+            <a href="https://dalink.to/jettle_" target="_blank" rel="noopener noreferrer" className="block px-3 py-1.5 text-sm text-accent2 hover:bg-border rounded-lg">Поддержать проект ❤️</a>
           </div>
         </>
       )}
 
       {/* мобильный тулбар: добавление элементов одним касанием */}
       {isMobile && (
-        <div className="fixed left-1/2 -translate-x-1/2 z-40 bg-panel border border-border rounded-2xl px-1.5 py-1.5 flex items-center gap-1 shadow-lg"
-          style={{ bottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>
-          <button title="Картинка" onClick={addImagePC} className="w-9 h-9 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-base">🖼</button>
-          <button title="Смайлик" onClick={openEmotePicker} className="w-9 h-9 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-base">😀</button>
-          <button title="Видео" onClick={addVideoPC} className="w-9 h-9 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-base">🎬</button>
-          <button title="Сайт / YouTube" onClick={addIframeEl} className="w-9 h-9 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-base">🌐</button>
-          <button title="Текст" onClick={addTextEl} className="w-9 h-9 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-base font-bold">Т</button>
-          <button title="Таймер" onClick={addTimerEl} className="w-9 h-9 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-base">⏱</button>
-          <button title={selected ? "Свойства элемента" : "Выберите элемент на холсте"} onClick={() => setSheetOpen(v => !v)}
-            className={`w-9 h-9 rounded-lg flex items-center justify-center text-base ${sheetOpen && selected ? "bg-accent text-white" : "hover:bg-border"}`}>✏️</button>
+        <div className="fixed inset-x-0 bottom-0 z-40 flex items-center justify-center px-3 pointer-events-none" style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>
+          <div className="flex items-center gap-1 pointer-events-auto rounded-full border border-border bg-panel px-3 py-1">
+            <button title="Картинка" onClick={() => setAddSheet("image")} className="w-8 h-8 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-sm">🖼</button>
+            <button title="Смайлик" onClick={openEmotePicker} className="w-8 h-8 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-sm">😀</button>
+            <button title="Видео" onClick={() => setAddSheet("video")} className="w-8 h-8 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-sm">🎬</button>
+            <button title="Сайт / YouTube" onClick={addIframeEl} className="w-8 h-8 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-sm">🌐</button>
+            <button title="Текст" onClick={addTextEl} className="w-8 h-8 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-sm font-bold">Т</button>
+            <button title="Таймер" onClick={addTimerEl} className="w-8 h-8 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-sm">⏱</button>
+            <button title={selected ? "Свойства элемента" : "Выберите элемент на холсте"} onClick={() => setSheetOpen(v => !v)}
+              className={`w-8 h-8 rounded-lg flex items-center justify-center text-sm ${sheetOpen && selected ? "bg-accent text-white" : "hover:bg-border"}`}>✏️</button>
+          </div>
         </div>
+      )}
+
+      {/* мобильный шит: источник добавления — файл с устройства или ссылка */}
+      {isMobile && addSheet && (
+        <>
+          <div className={`fixed inset-0 z-40 bg-black/50 ${addSheetClosing ? "fade-out" : "fade-in"}`} onClick={closeAddSheet} />
+          <div className={`fixed left-3 right-3 z-50 bg-panel border border-border rounded-2xl p-3 space-y-2 shadow-xl ${addSheetClosing ? "pop-out" : "pop-in"}`}
+            style={{ bottom: "calc(76px + env(safe-area-inset-bottom))", transformOrigin: "bottom center" }}>
+            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide px-1 pt-1">
+              Добавить: {addSheet === "image" ? "картинку" : "видео"}
+            </p>
+            <button onClick={() => { const kind = addSheet; closeAddSheet(); if (kind === "image") addImagePC(); else addVideoPC(); }}
+              className="w-full px-3 py-2.5 bg-accent hover:bg-violet-700 text-white text-sm rounded-xl transition-colors">
+              📱 Файл с устройства
+            </button>
+            <button onClick={() => { const kind = addSheet; closeAddSheet(); if (kind === "image") addImageUrl(); else addVideoUrl(); }}
+              className="w-full px-3 py-2.5 bg-border hover:bg-gray-600 text-white text-sm rounded-xl transition-colors">
+              🔗 Вставить ссылку (URL)
+            </button>
+            <button onClick={closeAddSheet}
+              className="w-full px-3 py-2 text-xs text-gray-500 hover:text-gray-300 transition-colors">Отмена</button>
+          </div>
+        </>
       )}
 
       {/* мобильная шторка свойств выбранного элемента */}
@@ -1048,7 +1182,7 @@ function PreviewElement({ el, scale, interactive }: { el: StreamElement; scale: 
   if (el.type === "image" || el.type === "gif") return <img src={el.src} alt="" className="w-full h-full object-fill pointer-events-none" draggable={false} />;
   if (el.type === "iframe")
     return (
-      <iframe src={withAutoplay(toEmbedUrl(el.src || ""), el.autoplay)} title="embed" data-id={el.id}
+      <iframe src={withMuted(withAutoplay(toEmbedUrl(el.src || ""), el.autoplay))} title="embed" data-id={el.id}
         className="w-full h-full" style={{ border: 0, pointerEvents: interactive ? "auto" : "none" }}
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen />
     );
@@ -1073,7 +1207,9 @@ function TimerPreview({ el, scale }: { el: StreamElement; scale: number }) {
     return () => clearInterval(i);
   }, [el.isRunning]);
 
-  const elapsedMs = el.isRunning && el.startTime ? Date.now() - el.startTime : el.elapsed || 0;
+  const elapsedMs = el.isRunning && el.startTime
+    ? Math.max(0, Date.now() - serverClockLag.ms - el.startTime) // serverClockLag: часы устройства могут расходиться с серверными
+    : el.elapsed || 0;
   const elapsedSec = Math.floor(elapsedMs / 1000);
   const display = el.timerDirection === "down" && el.duration
     ? formatTime(Math.max(0, el.duration - elapsedSec))
