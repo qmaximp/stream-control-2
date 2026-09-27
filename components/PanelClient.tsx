@@ -454,31 +454,38 @@ export default function PanelClient({ channel, room }: { channel?: string | null
   }, [addElement]);
 
   // обработчики добавления — общие для сайдбара и мобильного тулбара
+  // добавление с устройства: input добавляем в DOM — на iOS detached-инпут может не открыть выбор файла
   const addImagePC = useCallback(() => {
     const input = document.createElement("input");
     input.type = "file"; input.accept = "image/*";
+    input.style.display = "none";
     input.onchange = async () => {
-      const f = input.files?.[0]; if (!f) return;
+      const f = input.files?.[0]; if (!f) { input.remove(); return; }
       const dataUrl = await fileToDataUrl(f);
       const size = await getImageSize(dataUrl);
       const k = Math.min(1, 1280 / Math.max(size.w, size.h));
       const w = Math.round(size.w * k), h = Math.round(size.h * k);
       const p = parkingSpot(w, h);
       addElement({ type: "image", src: dataUrl, ...p, width: w, height: h, text: "" });
+      input.remove();
     };
+    document.body.appendChild(input);
     input.click();
   }, [addElement]);
 
   const addVideoPC = useCallback(() => {
     const input = document.createElement("input");
     input.type = "file"; input.accept = "video/*";
+    input.style.display = "none";
     input.onchange = async () => {
-      const f = input.files?.[0]; if (!f) return;
-      if (f.size > 40 * 1024 * 1024) { alert("Файл больше 40 МБ. Лучше использовать ссылку."); return; }
+      const f = input.files?.[0]; if (!f) { input.remove(); return; }
+      if (f.size > 40 * 1024 * 1024) { alert("Файл больше 40 МБ. Лучше использовать ссылку."); input.remove(); return; }
       const dataUrl = await fileToDataUrl(f);
       const p = parkingSpot(480, 270);
       addElement({ type: "video", src: dataUrl, ...p, width: 480, height: 270, text: "" });
+      input.remove();
     };
+    document.body.appendChild(input);
     input.click();
   }, [addElement]);
 
