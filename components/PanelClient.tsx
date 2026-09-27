@@ -57,7 +57,6 @@ export default function PanelClient({ channel, room }: { channel?: string | null
     setIsCoarse(window.matchMedia?.("(pointer: coarse)").matches || navigator.maxTouchPoints > 0);
   }, []);
   const viewportRef = useRef<HTMLDivElement>(null);
-  const panRef = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
   const baseViewRef = useRef<{ x: number; y: number; s: number } | null>(null);
   // свежий стейт для колбэков, замороженных useCallback'ом (паркинг считает каскад по актуальным элементам)
   const stateRef = useRef(state);
@@ -263,6 +262,7 @@ export default function PanelClient({ channel, room }: { channel?: string | null
     const target = twitchPreviewRef.current;
     if (!target) return;
     let cancelled = false;
+    let cleanupTimers: (() => void) | null = null;
 
     const boot = () => {
       if (cancelled) return;
@@ -287,20 +287,17 @@ export default function PanelClient({ channel, room }: { channel?: string | null
       player.addEventListener(Tw.Player.READY, () => setTimeout(resume, 200));
       player.addEventListener(Tw.Player.PLAY, () => { resumeAttempts = 0; });
       player.addEventListener(Tw.Player.PAUSE, () => {
-        // авто-возобновление (до 3 попыток), чтобы браузерная блокировка автозапуска не оставляла плеер на паузе
-        if (resumeAttempts >= 3) return;
+        // авто-возобновление (до 6 попыток), чтобы браузерная блокировка автозапуска не оставляла плеер на паузе
+        if (resumeAttempts >= 6) return;
         resumeAttempts += 1;
-        setTimeout(resume, 600);
+        setTimeout(resume, 500);
       });
       player.addEventListener(Tw.Player.ONLINE, resume);
-      // страховка от пропущенных событий: первые ~15 секунд периодически подтягиваем play()
+      // страховка: на мобильных плеер цепляет HLS долго — дёргаем play() по расписание ~40 секунд
       // (play() на уже играющем плеере — no-op)
-      let tries = 0;
-      const iv = setInterval(() => {
-        tries += 1;
-        if (cancelled || tries > 8) { clearInterval(iv); return; }
-        resume();
-      }, 2000);
+      const delays = [300, 700, 1500, 2500, 4000, 6000, 8000, 11000, 14000, 18000, 22000, 26000, 30000, 35000, 40000];
+      const timers = delays.map((d) => setTimeout(() => { if (!cancelled) resume(); }, d));
+      cleanupTimers = () => timers.forEach(clearTimeout);
     };
 
     if ((window as any).Twitch?.Player) {
@@ -320,6 +317,7 @@ export default function PanelClient({ channel, room }: { channel?: string | null
 
     return () => {
       cancelled = true;
+      cleanupTimers?.();
       twitchPlayerRef.current = null;
       if (twitchPreviewRef.current) twitchPreviewRef.current.innerHTML = "";
     };
@@ -690,8 +688,21 @@ export default function PanelClient({ channel, room }: { channel?: string | null
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp || baseViewRef.current) return;
-    const s = Math.min((vp.clientWidth - 80) / state.canvasW, (vp.clientHeight - 80) / state.canvasH);
-    const base = { s, x: (vp.clientWidth - state.canvasW * s) / 2, y: (vp.clientHeight - state.canvasH * s) / 2 };
+    if (!isMobileRef.current) {
+      const s = Math.min((vp.clientWidth - 80) / state.canvasW, (vp.clientHeight - 80) / state.canvasH);
+      const base = { s, x: (vp.clientWidth - state.canvasW * s) / 2, y: (vp.clientHeight - state.canvasH * s) / 2 };
+      baseViewRef.current = base;
+      setView(base);
+      return;
+    }
+    // на телефоне начальный вид показывает и парковку под канвасом:
+    // иначе добавленные элементы «далеко от превью», и их приходится долго искать
+    const w = state.canvasW + 240;
+    const h = state.canvasH + 60 + 560;
+    const s = Math.min((vp.clientWidth - 20) / w, (vp.clientHeight - 20) / h);
+    const cx = state.canvasW / 2;
+    const cy = (state.canvasH - 60 + 560) / 2;
+    const base = { s, x: vp.clientWidth / 2 - cx * s, y: vp.clientHeight / 2 - cy * s };
     baseViewRef.current = base;
     setView(base);
   }, [state.canvasW, state.canvasH]);
@@ -724,73 +735,102 @@ export default function PanelClient({ channel, room }: { channel?: string | null
     setView({ s: ns, x: mx - ((mx - x) / s) * ns, y: my - ((my - y) / s) * ns });
   }, []);
 
+  // панорама и щипок — единая pointer-реализация: работает одинаково мышью и пальцами
+  // на всех телефонах (старый вариант на touch-событиях вёл себя по-разному в разных браузерах)
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp) return;
-    const pinchRef = { current: null as null | { d0: number; s0: number; vx: number; vy: number } };
+    const pointers = new Map<number, { x: number; y: number }>();
+    let pan: { id: number; x: number; y: number; vx: number; vy: number } | null = null;
+    let pinch: null | { d0: number; s0: number; vx: number; vy: number } = null;
+
+    const cancelOneFingerGestures = () => {
+      dragRef.current = null;
+      rotateRef.current = null;
+      resizeRef.current = null;
+      pan = null;
+      document.body.classList.remove("dragging");
+      setPanning(false);
+    };
+
+    const startPinch = () => {
+      cancelOneFingerGestures();
+      const pts = [...pointers.values()];
+      if (pts.length < 2) return;
+      const [a, b] = pts;
+      pinch = {
+        d0: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+        s0: viewRef.current.s,
+        vx: viewRef.current.x,
+        vy: viewRef.current.y,
+      };
+    };
+
     const down = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      const onNoPan = !!target?.closest?.("[data-nopan]");
+      const onEl = !!target?.closest?.("[data-elwrap]");
       if (e.button === 1) {
         e.preventDefault();
         e.stopPropagation();
-        panRef.current = { x: e.clientX, y: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        pan = { id: e.pointerId, x: e.clientX, y: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
         setPanning(true);
         return;
       }
-      // левая кнопка/палец по пустому месту холста (не на элементе и не на чипе превью) — панорама
-      if (e.button === 0
-        && !(e.target as HTMLElement)?.closest?.("[data-elwrap]")
-        && !(e.target as HTMLElement)?.closest?.("[data-nopan]")) {
-        panRef.current = { x: e.clientX, y: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
+      if (e.button !== 0 || onNoPan) return;
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointers.size === 2) {
+        // второй палец — щипок, гасим драг/поворот/ресайз и панораму
+        startPinch();
+      } else if (pointers.size === 1 && !onEl) {
+        // палец/клик по пустому месту холста — панорама
+        pan = { id: e.pointerId, x: e.clientX, y: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
         setPanning(true);
       }
     };
+
     const move = (e: PointerEvent) => {
-      const p = panRef.current;
-      if (!p) return;
-      const dx = e.clientX - p.x, dy = e.clientY - p.y;
-      setView((v) => ({ ...v, x: p.vx + dx, y: p.vy + dy }));
+      const pt = pointers.get(e.pointerId);
+      if (!pt) return;
+      pt.x = e.clientX;
+      pt.y = e.clientY;
+      if (pinch && pointers.size >= 2) {
+        const pts = [...pointers.values()];
+        const [a, b] = pts;
+        const d = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+        const rect = vp.getBoundingClientRect();
+        const mx = (a.x + b.x) / 2 - rect.left;
+        const my = (a.y + b.y) / 2 - rect.top;
+        const ns = Math.min(200, Math.max(0.05, pinch.s0 * (d / pinch.d0)));
+        setView({ s: ns, x: mx - ((mx - pinch.vx) / pinch.s0) * ns, y: my - ((my - pinch.vy) / pinch.s0) * ns });
+        return;
+      }
+      if (pan && e.pointerId === pan.id) {
+        const p = pan;
+        setView((v) => ({ ...v, x: p.vx + (e.clientX - p.x), y: p.vy + (e.clientY - p.y) }));
+      }
     };
-    const up = () => { panRef.current = null; setPanning(false); };
-    // пинч-зум двумя пальцами
-    const tstart = (e: TouchEvent) => {
-      if (e.touches.length !== 2) return;
-      dragRef.current = null;
-      panRef.current = null;
-      resizeRef.current = null;
-      rotateRef.current = null;
-      document.body.classList.remove("dragging");
-      const [a, b] = [e.touches[0], e.touches[1]];
-      pinchRef.current = { d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), s0: viewRef.current.s, vx: viewRef.current.x, vy: viewRef.current.y };
-      setPanning(false);
+
+    const up = (e: PointerEvent) => {
+      pointers.delete(e.pointerId);
+      if (pan && e.pointerId === pan.id) {
+        pan = null;
+        setPanning(false);
+      }
+      if (pinch && pointers.size < 2) pinch = null;
+      // после щипка не возобновляем панораму до нового касания
     };
-    const tmove = (e: TouchEvent) => {
-      const p = pinchRef.current;
-      if (!p || e.touches.length !== 2) return;
-      e.preventDefault();
-      const [a, b] = [e.touches[0], e.touches[1]];
-      const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-      const ns = Math.min(200, Math.max(0.05, p.s0 * (d / p.d0)));
-      const rect = vp.getBoundingClientRect();
-      const mx = (a.clientX + b.clientX) / 2 - rect.left;
-      const my = (a.clientY + b.clientY) / 2 - rect.top;
-      setView({ s: ns, x: mx - ((mx - p.vx) / p.s0) * ns, y: my - ((my - p.vy) / p.s0) * ns });
-    };
-    const tend = () => { pinchRef.current = null; };
+
     vp.addEventListener("pointerdown", down);
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", up);
-    vp.addEventListener("touchstart", tstart, { passive: true });
-    vp.addEventListener("touchmove", tmove, { passive: false });
-    vp.addEventListener("touchend", tend);
     return () => {
       vp.removeEventListener("pointerdown", down);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
-      vp.removeEventListener("touchstart", tstart);
-      vp.removeEventListener("touchmove", tmove);
-      vp.removeEventListener("touchend", tend);
     };
   }, []);
 
