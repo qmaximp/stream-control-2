@@ -40,6 +40,30 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
   const panRef = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
   const baseViewRef = useRef<{ x: number; y: number; s: number } | null>(null);
 
+  // мобильные устройства: портрет блокируется экраном «поверни телефон», ландшафт — компактный тулбар
+  const [isPortrait, setIsPortrait] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const isMobileRef = useRef(false);
+  isMobileRef.current = isMobile;
+
+  useEffect(() => {
+    const pq = window.matchMedia("(orientation: portrait) and (max-width: 820px) and (pointer: coarse)");
+    const mq = window.matchMedia("(max-width: 950px), (pointer: coarse) and (max-width: 1200px)");
+    const upd = () => {
+      setIsPortrait(pq.matches);
+      setIsMobile(mq.matches && !pq.matches);
+    };
+    upd();
+    pq.addEventListener("change", upd);
+    mq.addEventListener("change", upd);
+    return () => {
+      pq.removeEventListener("change", upd);
+      mq.removeEventListener("change", upd);
+    };
+  }, []);
+
   useEffect(() => {
     const socket = ioInit({ transports: ["websocket", "polling"] });
     socketRef.current = socket;
@@ -211,7 +235,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
 
   const rotateRef = useRef<{ el: StreamElement; cx: number; cy: number; startAngle: number; startRotation: number } | null>(null);
 
-  const handleRotateStart = useCallback((e: React.MouseEvent, el: StreamElement) => {
+  const handleRotateStart = useCallback((e: React.PointerEvent, el: StreamElement) => {
     e.preventDefault();
     e.stopPropagation();
     if (!viewportRef.current) return;
@@ -227,7 +251,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
     };
   }, []);
 
-  const handleRotateMove = useCallback((e: MouseEvent) => {
+  const handleRotateMove = useCallback((e: PointerEvent) => {
     const r = rotateRef.current;
     if (!r) return;
     const cur = (Math.atan2(e.clientY - r.cy, e.clientX - r.cx) * 180) / Math.PI;
@@ -239,15 +263,28 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
 
   useEffect(() => {
     const fn = () => { rotateRef.current = null; };
-    window.addEventListener("mouseup", fn);
-    window.addEventListener("mousemove", handleRotateMove);
+    window.addEventListener("pointerup", fn);
+    window.addEventListener("pointercancel", fn);
+    window.addEventListener("pointermove", handleRotateMove);
     return () => {
-      window.removeEventListener("mouseup", fn);
-      window.removeEventListener("mousemove", handleRotateMove);
+      window.removeEventListener("pointerup", fn);
+      window.removeEventListener("pointercancel", fn);
+      window.removeEventListener("pointermove", handleRotateMove);
     };
   }, [handleRotateMove]);
 
-  const parkingSpot = () => ({ x: 0, y: 1200 });
+  // на телефоне новые элементы появляются в зоне предзагрузки под экраном,
+  // по горизонтали — по центру того, что сейчас видно; на ПК — как раньше (0, 1200)
+  const parkingSpot = (w = 0, h = 0) => {
+    if (isMobileRef.current) {
+      const vp = viewportRef.current;
+      const { x: vx, s } = viewRef.current;
+      const cx = vp ? Math.round((vp.clientWidth / 2 - vx) / s - w / 2) : 0;
+      const x = Math.min(Math.max(cx, -200), Math.max(-200, state.canvasW - 50 - w));
+      return { x, y: state.canvasH + 120 };
+    }
+    return { x: 0, y: 1200 };
+  };
 
   const openEmotePicker = useCallback(async () => {
     setEmoteOpen(true);
@@ -270,15 +307,62 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
   }, [channel]);
 
   const addEmote = useCallback((em: Emote) => {
-    const p = parkingSpot();
+    const p = parkingSpot(96, 96);
     addElement({ type: "image", src: em.url, ...p, width: 96, height: 96, text: "" });
+  }, [addElement]);
+
+  // обработчики добавления — общие для сайдбара и мобильного тулбара
+  const addImagePC = useCallback(() => {
+    const input = document.createElement("input");
+    input.type = "file"; input.accept = "image/*";
+    input.onchange = async () => {
+      const f = input.files?.[0]; if (!f) return;
+      const dataUrl = await fileToDataUrl(f);
+      const size = await getImageSize(dataUrl);
+      const k = Math.min(1, 1280 / Math.max(size.w, size.h));
+      const w = Math.round(size.w * k), h = Math.round(size.h * k);
+      const p = parkingSpot(w, h);
+      addElement({ type: "image", src: dataUrl, ...p, width: w, height: h, text: "" });
+    };
+    input.click();
+  }, [addElement]);
+
+  const addVideoPC = useCallback(() => {
+    const input = document.createElement("input");
+    input.type = "file"; input.accept = "video/*";
+    input.onchange = async () => {
+      const f = input.files?.[0]; if (!f) return;
+      if (f.size > 40 * 1024 * 1024) { alert("Файл больше 40 МБ. Лучше использовать ссылку."); return; }
+      const dataUrl = await fileToDataUrl(f);
+      const p = parkingSpot(480, 270);
+      addElement({ type: "video", src: dataUrl, ...p, width: 480, height: 270, text: "" });
+    };
+    input.click();
+  }, [addElement]);
+
+  const addIframeEl = useCallback(() => {
+    const p = parkingSpot(560, 315);
+    const url = prompt("Ссылка на сайт или YouTube (например, https://youtube.com/watch?v=...):");
+    if (url) addElement({ type: "iframe", src: url, ...p, width: 560, height: 315, text: "" });
+  }, [addElement]);
+
+  const addTextEl = useCallback(() => {
+    const p = parkingSpot(300, 60);
+    addElement({ type: "text", ...p, width: 300, height: 60, text: "Новый текст", fontSize: 36, color: "#ffffff", fontWeight: "bold", bgColor: "transparent" });
+  }, [addElement]);
+
+  const addTimerEl = useCallback(() => {
+    const p = parkingSpot(200, 60);
+    addElement({ type: "timer", ...p, width: 200, height: 60, text: "", duration: 300, timerDirection: "down", fontSize: 40, color: "#ffffff", fontWeight: "bold", bgColor: "transparent", startTime: null, isRunning: false, timerLabel: "" });
   }, [addElement]);
 
   const dragRef = useRef<{ id: string; offX: number; offY: number; type: string; moved: boolean; sx: number; sy: number } | null>(null);
 
-  const handleDragStart = (e: React.MouseEvent, el: StreamElement) => {
+  const handleDragStart = (e: React.PointerEvent, el: StreamElement) => {
     if (el.locked) return;
+    if (e.button !== 0) return;
     e.preventDefault();
+    e.stopPropagation();
     const { x: vx, y: vy, s } = viewRef.current;
     const rect = viewportRef.current!.getBoundingClientRect();
     const lx = (e.clientX - rect.left - vx) / s;
@@ -294,7 +378,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
   const lastMoveRef = useRef<{ id: string; x: number; y: number } | null>(null);
 
   const handleMouseMove = useCallback(
-    (e: MouseEvent) => {
+    (e: PointerEvent) => {
       if (!dragRef.current || !viewportRef.current) return;
       const { x: vx, y: vy, s } = viewRef.current;
       const rect = viewportRef.current.getBoundingClientRect();
@@ -333,11 +417,13 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
   }, [emit]);
 
   useEffect(() => {
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
+    window.addEventListener("pointermove", handleMouseMove);
+    window.addEventListener("pointerup", handleMouseUp);
+    window.addEventListener("pointercancel", handleMouseUp);
     return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
+      window.removeEventListener("pointermove", handleMouseMove);
+      window.removeEventListener("pointerup", handleMouseUp);
+      window.removeEventListener("pointercancel", handleMouseUp);
     };
   }, [handleMouseMove, handleMouseUp]);
 
@@ -357,7 +443,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
   const resizeThrottleRef = useRef(0);
   const lastResizeRef = useRef<{ id: string; x: number; y: number; width: number; height: number } | null>(null);
 
-  const handleResizeStart = (e: React.MouseEvent, el: StreamElement, dir: string) => {
+  const handleResizeStart = (e: React.PointerEvent, el: StreamElement, dir: string) => {
     e.preventDefault();
     e.stopPropagation();
     document.body.classList.add("dragging");
@@ -369,7 +455,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
   };
 
   const handleResizeMove = useCallback(
-    (e: MouseEvent) => {
+    (e: PointerEvent) => {
       if (!resizeRef.current || !viewportRef.current) return;
       const { dir, orig } = resizeRef.current;
       const { x: vx, y: vy, s } = viewRef.current;
@@ -425,11 +511,13 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
         lastResizeRef.current = null;
       }
     };
-    window.addEventListener("mouseup", fn);
-    window.addEventListener("mousemove", handleResizeMove);
+    window.addEventListener("pointerup", fn);
+    window.addEventListener("pointercancel", fn);
+    window.addEventListener("pointermove", handleResizeMove);
     return () => {
-      window.removeEventListener("mouseup", fn);
-      window.removeEventListener("mousemove", handleResizeMove);
+      window.removeEventListener("pointerup", fn);
+      window.removeEventListener("pointercancel", fn);
+      window.removeEventListener("pointermove", handleResizeMove);
     };
   }, [handleResizeMove, emit]);
 
@@ -459,45 +547,121 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
     return () => vp.removeEventListener("wheel", onWheel);
   }, []);
 
+  // кнопки зума −/+ : приближение к центру видимой области
+  const zoomBy = useCallback((factor: number) => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const { x, y, s } = viewRef.current;
+    const ns = Math.min(200, Math.max(0.001, s * factor));
+    if (ns === s) return;
+    const mx = vp.clientWidth / 2, my = vp.clientHeight / 2;
+    setView({ s: ns, x: mx - ((mx - x) / s) * ns, y: my - ((my - y) / s) * ns });
+  }, []);
+
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp) return;
-    const down = (e: MouseEvent) => {
-      if (e.button !== 1) return;
-      e.preventDefault();
-      e.stopPropagation();
-      panRef.current = { x: e.clientX, y: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
-      setPanning(true);
+    const pinchRef = { current: null as null | { d0: number; s0: number; vx: number; vy: number } };
+    const down = (e: PointerEvent) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        e.stopPropagation();
+        panRef.current = { x: e.clientX, y: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
+        setPanning(true);
+        return;
+      }
+      // левая кнопка/палец по пустому месту холста (не на элементе и не на чипе превью) — панорама
+      if (e.button === 0
+        && !(e.target as HTMLElement)?.closest?.("[data-elwrap]")
+        && !(e.target as HTMLElement)?.closest?.("[data-nopan]")) {
+        panRef.current = { x: e.clientX, y: e.clientY, vx: viewRef.current.x, vy: viewRef.current.y };
+        setPanning(true);
+      }
     };
-    const move = (e: MouseEvent) => {
+    const move = (e: PointerEvent) => {
       const p = panRef.current;
       if (!p) return;
       const dx = e.clientX - p.x, dy = e.clientY - p.y;
       setView((v) => ({ ...v, x: p.vx + dx, y: p.vy + dy }));
     };
     const up = () => { panRef.current = null; setPanning(false); };
-    vp.addEventListener("mousedown", down);
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
+    // пинч-зум двумя пальцами
+    const tstart = (e: TouchEvent) => {
+      if (e.touches.length !== 2) return;
+      dragRef.current = null;
+      panRef.current = null;
+      resizeRef.current = null;
+      rotateRef.current = null;
+      document.body.classList.remove("dragging");
+      const [a, b] = [e.touches[0], e.touches[1]];
+      pinchRef.current = { d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), s0: viewRef.current.s, vx: viewRef.current.x, vy: viewRef.current.y };
+      setPanning(false);
+    };
+    const tmove = (e: TouchEvent) => {
+      const p = pinchRef.current;
+      if (!p || e.touches.length !== 2) return;
+      e.preventDefault();
+      const [a, b] = [e.touches[0], e.touches[1]];
+      const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      const ns = Math.min(200, Math.max(0.05, p.s0 * (d / p.d0)));
+      const rect = vp.getBoundingClientRect();
+      const mx = (a.clientX + b.clientX) / 2 - rect.left;
+      const my = (a.clientY + b.clientY) / 2 - rect.top;
+      setView({ s: ns, x: mx - ((mx - p.vx) / p.s0) * ns, y: my - ((my - p.vy) / p.s0) * ns });
+    };
+    const tend = () => { pinchRef.current = null; };
+    vp.addEventListener("pointerdown", down);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    vp.addEventListener("touchstart", tstart, { passive: true });
+    vp.addEventListener("touchmove", tmove, { passive: false });
+    vp.addEventListener("touchend", tend);
     return () => {
-      vp.removeEventListener("mousedown", down);
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
+      vp.removeEventListener("pointerdown", down);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      vp.removeEventListener("touchstart", tstart);
+      vp.removeEventListener("touchmove", tmove);
+      vp.removeEventListener("touchend", tend);
     };
   }, []);
 
+  // вертикальная ориентация телефона — просим повернуть (как на референсе)
+  if (isPortrait) {
+    return (
+      <div className="min-h-[100dvh] bg-bg flex items-center justify-center p-6">
+        <div className="bg-panel border border-border rounded-2xl p-8 text-center max-w-xs w-full">
+          <div className="text-5xl mb-4">📱</div>
+          <h1 className="text-lg font-semibold mb-2">Поверните телефон горизонтально</h1>
+          <p className="text-sm text-gray-400 mb-5">Панели нужно широкое поле для работы с оверлеем</p>
+          <button onClick={() => setIsPortrait(false)} className="text-sm text-accent2 hover:underline">Продолжить всё равно</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="h-screen overflow-hidden flex flex-col bg-bg">
-      <header className="flex items-center gap-4 px-5 py-3 bg-panel border-b border-border">
+    <div className="h-[100dvh] overflow-hidden flex flex-col bg-bg">
+      <header className={`flex items-center gap-3 bg-panel border-b border-border ${isMobile ? "px-3 py-2" : "px-5 py-3"}`}>
+        {isMobile && (
+          <button onClick={() => setMenuOpen(v => !v)} aria-label="Меню"
+            className="w-9 h-9 rounded-lg bg-border hover:bg-gray-600 flex flex-col items-center justify-center gap-[3px] shrink-0">
+            <span className="block w-4 h-[2px] bg-gray-300 rounded" />
+            <span className="block w-4 h-[2px] bg-gray-300 rounded" />
+            <span className="block w-4 h-[2px] bg-gray-300 rounded" />
+          </button>
+        )}
         <div className="flex items-center gap-2">
-          <LogoMark size={36} />
+          <LogoMark size={isMobile ? 28 : 36} />
           <div>
-            <h1 className="text-base font-semibold leading-tight">Ovrly</h1>
-            <p className="text-xs text-gray-500 leading-tight">Панель модератора</p>
+            <h1 className={`${isMobile ? "text-sm" : "text-base"} font-semibold leading-tight`}>Ovrly</h1>
+            <p className={`${isMobile ? "text-[10px]" : "text-xs"} text-gray-500 leading-tight`}>Панель модератора</p>
           </div>
         </div>
         <div className="flex-1" />
-        <div className="flex items-center gap-3">
+        <div className={`flex items-center gap-3 ${isMobile ? "hidden" : ""}`}>
           <button onClick={() => applyTheme(theme === "dark" ? "light" : "dark")}
             title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
             aria-label={theme === "dark" ? "Включить светлую тему" : "Включить тёмную тему"}
@@ -512,7 +676,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
         </div>
       </header>
 
-      <div className="flex gap-1 px-5 pt-3 bg-panel border-b border-border">
+      <div className={`flex gap-1 px-5 pt-3 bg-panel border-b border-border ${isMobile ? "hidden" : ""}`}>
         <button
           onClick={() => setTab("elements")}
           className={`px-4 py-2 text-sm rounded-t-lg transition-colors ${tab === "elements" ? "bg-bg text-[color:var(--c-on-bg)] border-b-2 border-accent" : "text-gray-500 hover:text-gray-300"}`}
@@ -524,23 +688,12 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
       </div>
 
       <div className={`flex-1 flex overflow-hidden ${tab === "elements" ? "" : "hidden"}`}>
+          {!isMobile && (
           <aside className="w-72 shrink-0 bg-panel border-r border-border p-4 overflow-y-auto">
             <h2 className="text-sm font-semibold mb-3 text-gray-400 uppercase tracking-wide">Добавить элемент</h2>
             <div className="space-y-2">
               <div className="flex gap-2">
-                <button onClick={() => {
-                  const input = document.createElement("input");
-                  input.type = "file"; input.accept = "image/*";
-                  input.onchange = async () => {
-                    const f = input.files?.[0]; if (!f) return;
-                    const dataUrl = await fileToDataUrl(f);
-                    const size = await getImageSize(dataUrl);
-                    const k = Math.min(1, 1280 / Math.max(size.w, size.h));
-                    const p = parkingSpot();
-                    addElement({ type: "image", src: dataUrl, ...p, width: Math.round(size.w * k), height: Math.round(size.h * k), text: "" });
-                  };
-                  input.click();
-                }} className="flex-1 px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🖼 С ПК</button>
+                <button onClick={addImagePC} className="flex-1 px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🖼 С ПК</button>
                 <button onClick={async () => {
                   const url = prompt("Ссылка на картинку:");
                   if (!url) return;
@@ -551,18 +704,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
                 }} className="flex-1 px-3 py-2 bg-border hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">🔗 URL</button>
               </div>
               <div className="flex gap-2">
-                <button onClick={() => {
-                  const input = document.createElement("input");
-                  input.type = "file"; input.accept = "video/*";
-                  input.onchange = async () => {
-                    const f = input.files?.[0]; if (!f) return;
-                    if (f.size > 40 * 1024 * 1024) { alert("Файл больше 40 МБ. Лучше использовать ссылку."); return; }
-                    const dataUrl = await fileToDataUrl(f);
-                    const p = parkingSpot();
-                    addElement({ type: "video", src: dataUrl, ...p, width: 480, height: 270, text: "" });
-                  };
-                  input.click();
-                }} className="flex-1 px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🎬 С ПК</button>
+                <button onClick={addVideoPC} className="flex-1 px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🎬 С ПК</button>
                 <button onClick={() => {
                   const url = prompt("Ссылка на видео (MP4, WebM):");
                   const p = parkingSpot();
@@ -570,20 +712,10 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
                 }} className="flex-1 px-3 py-2 bg-border hover:bg-gray-600 text-white text-sm rounded-lg transition-colors">🔗 URL</button>
               </div>
               <button onClick={openEmotePicker} className="w-full px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">😀 Добавить смайлик</button>
-              <button onClick={() => {
-                const p = parkingSpot();
-                const url = prompt("Ссылка на сайт или YouTube (например, https://youtube.com/watch?v=...):");
-                if (url) addElement({ type: "iframe", src: url, ...p, width: 560, height: 315, text: "" });
-              }} className="w-full px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🌐 Сайт / YouTube</button>
-              <button onClick={() => {
-                const p = parkingSpot();
-                addElement({ type: "text", ...p, width: 300, height: 60, text: "Новый текст", fontSize: 36, color: "#ffffff", fontWeight: "bold", bgColor: "transparent" });
-              }}
+              <button onClick={addIframeEl} className="w-full px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">🌐 Сайт / YouTube</button>
+              <button onClick={addTextEl}
                 className="w-full px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">✏️ Текст</button>
-              <button onClick={() => {
-                const p = parkingSpot();
-                addElement({ type: "timer", ...p, width: 200, height: 60, text: "", duration: 300, timerDirection: "down", fontSize: 40, color: "#ffffff", fontWeight: "bold", bgColor: "transparent", startTime: null, isRunning: false, timerLabel: "" });
-              }}
+              <button onClick={addTimerEl}
                 className="w-full px-3 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors">⏱ Таймер</button>
             </div>
 
@@ -619,12 +751,14 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
             <button onClick={() => { if (confirm("Очистить все элементы?")) emit("elements:clear"); }}
               className="w-full mt-4 px-3 py-2 text-sm text-red-400 hover:bg-red-950/40 rounded-lg border border-red-900/50 transition-colors">Очистить всё</button>
           </aside>
+          )}
 
           <div className="flex-1 flex flex-col bg-bg overflow-hidden">
             <div
               ref={viewportRef}
               className={`flex-1 relative overflow-hidden ${panning ? "cursor-grabbing" : ""}`}
               style={{
+                touchAction: "none",
                 background: "var(--c-canvas)",
                 backgroundImage: "radial-gradient(var(--c-dot) 1px, transparent 1px)",
                 backgroundSize: `${Math.max(4, 22 * view.s)}px ${Math.max(4, 22 * view.s)}px`,
@@ -658,13 +792,15 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
                 {state.elements.map((el) => {
                   const hs = 10 / view.s;
                   return (
-                      <div key={el.id} onMouseDown={(e) => handleDragStart(e, el)}
+                      <div key={el.id} onPointerDown={(e) => handleDragStart(e, el)}
+                        data-elwrap="1"
                         className={`absolute select-none group ${el.locked ? "" : "cursor-grab"}`}
                         style={{
                         left: el.x, top: el.y, width: el.width, height: el.height,
                           zIndex: el.zIndex, opacity: el.visible ? Math.max(el.opacity ?? 1, 0.08) : 0.35,
                         outline: selectedId === el.id ? `${2 / view.s}px solid rgb(var(--c-accent2))` : undefined,
                         transform: `${el.rotation ? `rotate(${el.rotation}deg)` : ""}${el.flipH || el.flipV ? ` scale(${el.flipH ? -1 : 1}, ${el.flipV ? -1 : 1})` : ""}` || undefined,
+                        touchAction: "none",
                       }}>
                         <PreviewElement el={el} scale={1} interactive={interactiveIframeId === el.id} />
                         {/* слой ручек: контр-зеркалится, чтобы при flipH/flipV ручки не переворачивались вместе с элементом */}
@@ -683,11 +819,11 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
                         if (dir === "n" || dir === "s") { pos.left = "50%"; pos.marginLeft = -hs / 2; }
                         if (dir === "e" || dir === "w") { pos.top = "50%"; pos.marginTop = -hs / 2; }
                         return (
-                          <div key={dir} onMouseDown={(e) => handleResizeStart(e, el, dir)} className="handle" style={pos} />
+                          <div key={dir} onPointerDown={(e) => handleResizeStart(e, el, dir)} className="handle" style={pos} />
                         );
                       })}
                       {el.type === "iframe" && selectedId === el.id && !el.locked && (
-                        <div onMouseDown={(e) => { e.stopPropagation(); handleDragStart(e, el); }}
+                        <div onPointerDown={(e) => { e.stopPropagation(); handleDragStart(e, el); }}
                           className="absolute flex items-center justify-center rounded-full pointer-events-auto"
                           style={{
                             left: `calc(50% - ${11 / view.s}px)`, top: -60 / view.s,
@@ -705,7 +841,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
                       )}
                       {!el.locked && (
                         <div
-                          onMouseDown={(e) => handleRotateStart(e, el)}
+                          onPointerDown={(e) => handleRotateStart(e, el)}
                           title="Повернуть (Shift — шаг 15°)"
                           className={`absolute rounded-full flex items-center justify-center transition-opacity pointer-events-auto ${selectedId === el.id ? "" : "opacity-0 group-hover:opacity-100"}`}
                           style={{
@@ -730,6 +866,7 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
               <div
                 className="absolute right-4 bottom-3 z-10 flex items-center gap-2 bg-panel border border-border rounded-full pl-3 pr-2 py-1.5"
                 style={{ boxShadow: "0 2px 10px rgba(0,0,0,.25)" }}
+                data-nopan="1"
                 onMouseDown={(e) => e.stopPropagation()}
               >
                 <span className="text-xs text-gray-400 select-none">Превью</span>
@@ -744,16 +881,20 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
                 <span className={`text-xs font-medium select-none ${previewOn ? "text-green-400" : "text-gray-500"}`}>{previewOn ? "ON" : "OFF"}</span>
               </div>
             </div>
-            <div className="shrink-0 flex items-center gap-2 px-6 pb-3">
+            <div className={`shrink-0 flex items-center gap-2 px-6 pb-3 ${isMobile ? "mb-20" : ""}`}>
+              <button onClick={() => zoomBy(1 / 1.25)} title="Уменьшить"
+                className="w-6 h-6 rounded bg-panel border border-border text-gray-400 hover:text-white flex items-center justify-center text-xs">−</button>
               <span className="bg-panel border border-border rounded px-2 py-1 text-[10px] text-gray-400">🔍 {Math.round((view.s / (baseViewRef.current?.s ?? view.s)) * 100)}%</span>
+              <button onClick={() => zoomBy(1.25)} title="Увеличить"
+                className="w-6 h-6 rounded bg-panel border border-border text-gray-400 hover:text-white flex items-center justify-center text-xs">+</button>
               <button onClick={() => { if (baseViewRef.current) setView(baseViewRef.current); }}
                 className="bg-panel border border-border rounded px-2 py-1 text-[10px] text-gray-400 hover:text-white transition-colors">Сбросить</button>
-              <span className="bg-panel border border-border rounded px-2 py-1 text-[10px] text-gray-500">колесо — зум · зажатое колесо — панорама</span>
+              <span className="bg-panel border border-border rounded px-2 py-1 text-[10px] text-gray-500">колесо / щипок — зум · палец или зажатое колесо — панорама</span>
             </div>
           </div>
 
           {selected && (
-            <aside className="w-72 shrink-0 bg-panel border-l border-border p-4 overflow-y-auto">
+            <aside className={`w-72 shrink-0 bg-panel border-l border-border p-4 overflow-y-auto ${isMobile ? "hidden" : ""}`}>
               <PropertyEditor el={selected} update={(partial) => updateElement(selected.id, partial)} emit={emit} />
             </aside>
           )}
@@ -761,6 +902,69 @@ export default function PanelClient({ channel }: { channel?: string | null }) {
       <div className={`flex-1 overflow-auto ${tab === "obs" ? "" : "hidden"}`}>
         <ObsPanel />
       </div>
+
+      {/* бургер-меню: вкладки, тема, статус */}
+      {isMobile && menuOpen && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+          <div className="fixed top-[60px] left-2 z-50 w-64 bg-panel border border-border rounded-xl p-2 shadow-xl space-y-1">
+            <button onClick={() => { setTab("elements"); setMenuOpen(false); }}
+              className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors ${tab === "elements" ? "bg-accent text-white" : "text-gray-300 hover:bg-border"}`}>
+              Элементы оверлея
+            </button>
+            <button onClick={() => { setTab("obs"); setMenuOpen(false); }}
+              className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors ${tab === "obs" ? "bg-accent text-white" : "text-gray-300 hover:bg-border"}`}>
+              Управление OBS
+            </button>
+            <div className="h-px bg-border my-1" />
+            <div className="flex items-center justify-between px-3 py-1.5">
+              <span className="text-sm text-gray-300">Тема: {theme === "dark" ? "тёмная" : "светлая"}</span>
+              <button onClick={() => applyTheme(theme === "dark" ? "light" : "dark")}
+                className={`w-9 h-9 rounded-full bg-border flex items-center justify-center transition-colors ${theme === "dark" ? "text-gray-300" : "text-[#443f66]"}`}>
+                {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+              </button>
+            </div>
+            <div className="flex items-center gap-2 px-3 py-1.5">
+              <span className={`w-2 h-2 rounded-full ${connected ? "bg-green-400" : "bg-red-400"}`} />
+              <span className={`text-sm ${connected ? "text-green-400" : "text-red-400"}`}>
+                Сервер: {connected ? "онлайн" : "оффлайн"}
+              </span>
+            </div>
+            <a href="/overlay" target="_blank" className="block px-3 py-1.5 text-sm text-accent2 hover:bg-border rounded-lg">Открыть оверлей ↗</a>
+          </div>
+        </>
+      )}
+
+      {/* мобильный тулбар: добавление элементов одним касанием */}
+      {isMobile && (
+        <div className="fixed left-1/2 -translate-x-1/2 z-40 bg-panel border border-border rounded-2xl px-1.5 py-1.5 flex items-center gap-1 shadow-lg"
+          style={{ bottom: "max(0.75rem, env(safe-area-inset-bottom))" }}>
+          <button title="Картинка" onClick={addImagePC} className="w-9 h-9 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-base">🖼</button>
+          <button title="Смайлик" onClick={openEmotePicker} className="w-9 h-9 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-base">😀</button>
+          <button title="Видео" onClick={addVideoPC} className="w-9 h-9 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-base">🎬</button>
+          <button title="Сайт / YouTube" onClick={addIframeEl} className="w-9 h-9 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-base">🌐</button>
+          <button title="Текст" onClick={addTextEl} className="w-9 h-9 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-base font-bold">Т</button>
+          <button title="Таймер" onClick={addTimerEl} className="w-9 h-9 rounded-lg hover:bg-border active:bg-accent flex items-center justify-center text-base">⏱</button>
+          <button title={selected ? "Свойства элемента" : "Выберите элемент на холсте"} onClick={() => setSheetOpen(v => !v)}
+            className={`w-9 h-9 rounded-lg flex items-center justify-center text-base ${sheetOpen && selected ? "bg-accent text-white" : "hover:bg-border"}`}>✏️</button>
+        </div>
+      )}
+
+      {/* мобильная шторка свойств выбранного элемента */}
+      {isMobile && sheetOpen && selected && (
+        <div className="fixed left-0 right-0 z-40 max-h-[46dvh] overflow-y-auto bg-panel border-t border-border p-4"
+          style={{ bottom: "calc(76px + env(safe-area-inset-bottom))" }}>
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Свойства: {selected.type}</span>
+            <div className="flex items-center gap-2">
+              <button onClick={() => { emit("element:delete", selected.id); setSelectedId(null); setSheetOpen(false); }}
+                className="px-2 py-1 text-xs text-red-400 border border-red-900/50 rounded-lg">Удалить</button>
+              <button onClick={() => setSheetOpen(false)} className="w-7 h-7 rounded-lg bg-border text-gray-400 hover:text-white">✕</button>
+            </div>
+          </div>
+          <PropertyEditor el={selected} update={(partial) => updateElement(selected.id, partial)} emit={emit} />
+        </div>
+      )}
 
       {emoteOpen && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center" onMouseDown={() => setEmoteOpen(false)}>
