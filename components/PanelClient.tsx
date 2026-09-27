@@ -938,20 +938,24 @@ export default function PanelClient({ channel, room }: { channel?: string | null
               }}
               onClick={(e) => { if (e.target === e.currentTarget) { setSelectedId(null); setInteractiveIframeId(null); } }}
             >
+              {/* фон канваса + превью: ВНЕ transform-контейнера (transform предка блокирует
+                  автовоспроизведение Twitch-плеера), позиционируем в экранных координатах view */}
+              <div
+                className="absolute bg-black border border-border rounded-md pointer-events-none overflow-hidden"
+                style={{ left: view.x, top: view.y, width: state.canvasW * view.s, height: state.canvasH * view.s }}
+              >
+                <div className="absolute inset-0 opacity-10" style={{ backgroundImage: "linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)", backgroundSize: `${40 * view.s}px ${40 * view.s}px` }} />
+                {mounted && previewOn && channel && (
+                  <div
+                    key={previewKey}
+                    ref={twitchPreviewRef}
+                    id="twitch-preview"
+                    className="absolute inset-0"
+                  />
+                )}
+              </div>
               <div className="absolute left-0 top-0"
                 style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`, transformOrigin: "0 0" }}>
-                <div className="absolute bg-black border border-border rounded-md pointer-events-none"
-                  style={{ left: 0, top: 0, width: state.canvasW, height: state.canvasH }}>
-                  <div className="absolute inset-0 opacity-10" style={{ backgroundImage: "linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)", backgroundSize: "40px 40px" }} />
-                  {mounted && previewOn && channel && (
-                    <div
-                      key={previewKey}
-                      ref={twitchPreviewRef}
-                      id="twitch-preview"
-                      className="absolute inset-0 overflow-hidden rounded-md"
-                    />
-                  )}
-                </div>
                 <span className="absolute text-center tracking-widest text-gray-600 uppercase pointer-events-none"
                   style={{ left: 0, top: -175, width: state.canvasW, fontSize: 28 }}>зона предзагрузки элементов</span>
                 <span className="absolute text-center tracking-widest text-gray-600 uppercase pointer-events-none"
