@@ -70,6 +70,21 @@ app.prepare().then(() => {
 
     socket.emit('state:init', state);
 
+    // живые курсоры: ретрансляция позиции мыши другим участникам комнаты.
+    // Логин берём из handshake (?login=) — данные косметические, авторизация не нужна
+    const cursorLogin = ((socket.handshake.query.login || 'гость') + '').slice(0, 40);
+
+    socket.on('cursor:move', (data) => {
+      if (!data || typeof data.x !== 'number' || typeof data.y !== 'number' || !isFinite(data.x) || !isFinite(data.y)) return;
+      const x = Math.max(-100000, Math.min(100000, data.x));
+      const y = Math.max(-100000, Math.min(100000, data.y));
+      socket.broadcast.to(room).emit('cursor:update', { id: socket.id, login: cursorLogin, x, y, hidden: !!data.hidden });
+    });
+
+    socket.on('disconnect', () => {
+      io.to(room).emit('cursor:leave', { id: socket.id });
+    });
+
     socket.on('canvas:resize', (dims) => {
       state.canvasW = dims.w;
       state.canvasH = dims.h;

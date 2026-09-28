@@ -14,7 +14,7 @@ const CANVAS_H = 1080;
 
 type Emote = { platform: string; code: string; url: string };
 
-export default function PanelClient({ channel, room }: { channel?: string | null; room?: string | null }) {
+export default function PanelClient({ channel, room, userLogin }: { channel?: string | null; room?: string | null; userLogin?: string | null }) {
   const [state, setState] = useState<SyncState>({ elements: [], canvasW: CANVAS_W, canvasH: CANVAS_H });
   const [connected, setConnected] = useState(false);
   const [tab, setTab] = useState<"elements" | "obs">("elements");
@@ -53,6 +53,9 @@ export default function PanelClient({ channel, room }: { channel?: string | null
   const viewRef = useRef(view);
   viewRef.current = view;
   const [panning, setPanning] = useState(false);
+  type RemoteCursor = { id: string; login: string; x: number; y: number; hidden: boolean; t: number };
+  const [remoteCursors, setRemoteCursors] = useState<RemoteCursor[]>([]);
+  const cursorLastSent = useRef(0);
   const [isCoarse, setIsCoarse] = useState(false);
   useEffect(() => {
     setIsCoarse(window.matchMedia?.("(pointer: coarse)").matches || navigator.maxTouchPoints > 0);
@@ -112,8 +115,20 @@ export default function PanelClient({ channel, room }: { channel?: string | null
   }, []);
 
   useEffect(() => {
-    const socket = ioInit({ transports: ["websocket", "polling"], query: { room: room || "default" } });
+    const socket = ioInit({ transports: ["websocket", "polling"], query: { room: room || "default", login: userLogin || "" } });
     socketRef.current = socket;
+
+    // живые курсоры других пользователей этой комнаты
+    socket.on("cursor:update", (c: { id: string; login: string; x: number; y: number; hidden?: boolean }) => {
+      setRemoteCursors((prev) => {
+        const next = prev.filter((p) => p.id !== c.id);
+        if (!c.hidden) next.push({ id: c.id, login: c.login, x: c.x, y: c.y, hidden: false, t: Date.now() });
+        return next;
+      });
+    });
+    socket.on("cursor:leave", ({ id }: { id: string }) => {
+      setRemoteCursors((prev) => prev.filter((p) => p.id !== id));
+    });
 
     socket.on("connect", () => setConnected(true));
     socket.on("disconnect", () => setConnected(false));
@@ -156,7 +171,39 @@ export default function PanelClient({ channel, room }: { channel?: string | null
     );
 
     return () => { socket.disconnect(); };
+  }, [room, userLogin]);
+
+  // курсоры пропадают, если участник перестал двигать мышью или отключился
+  useEffect(() => {
+    const t = setInterval(() => {
+      setRemoteCursors((prev) => (prev.some((p) => Date.now() - p.t > 5000) ? prev.filter((p) => Date.now() - p.t <= 5000) : prev));
+    }, 3000);
+    return () => clearInterval(t);
   }, []);
+
+  // отправка позиции мыши на канвасе другим участникам (не чаще ~20 раз/с)
+  useEffect(() => {
+    const vp = canvasEl;
+    if (!vp) return;
+    const send = (x: number, y: number, hidden: boolean) => {
+      const now = performance.now();
+      if (!hidden && now - cursorLastSent.current < 50) return;
+      cursorLastSent.current = now;
+      socketRef.current?.emit("cursor:move", { x, y, hidden });
+    };
+    const onMove = (e: PointerEvent) => {
+      if (e.pointerType !== "mouse") return;
+      const rect = vp.getBoundingClientRect();
+      send((e.clientX - rect.left - viewRef.current.x) / viewRef.current.s, (e.clientY - rect.top - viewRef.current.y) / viewRef.current.s, false);
+    };
+    const onLeave = () => send(0, 0, true);
+    vp.addEventListener("pointermove", onMove);
+    vp.addEventListener("pointerleave", onLeave);
+    return () => {
+      vp.removeEventListener("pointermove", onMove);
+      vp.removeEventListener("pointerleave", onLeave);
+    };
+  }, [canvasEl]);
 
   const emit = useCallback((event: string, data?: any) => {
     socketRef.current?.emit(event, data);
@@ -1176,6 +1223,24 @@ export default function PanelClient({ channel, room }: { channel?: string | null
                     </div>
                   );
                 })}
+                {/* курсоры других участников: контр-скейл, чтобы курсор был одного размера на любом зуме */}
+                {remoteCursors.filter((c) => !c.hidden).map((c) => (
+                  <div
+                    key={c.id}
+                    className="absolute pointer-events-none select-none"
+                    style={{ left: c.x, top: c.y, zIndex: 3000, transform: `scale(${1 / view.s})`, transformOrigin: "0 0", transition: "left 70ms linear, top 70ms linear" }}
+                  >
+                    <svg width="16" height="21" viewBox="0 0 24 28" style={{ filter: "drop-shadow(0 1px 2px rgba(0,0,0,.55))" }}>
+                      <path d="M4 2l14.5 10.6-6.8.7L14.6 21l-3.4 1.4-2.9-7.7L4 18.4z" fill="rgb(var(--c-accent2))" stroke="#fff" strokeWidth="1.6" strokeLinejoin="round" />
+                    </svg>
+                    <div
+                      className="ml-2 mt-0.5 inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
+                      style={{ background: "rgb(var(--c-accent))", boxShadow: "0 1px 4px rgba(0,0,0,.4)" }}
+                    >
+                      {c.login}
+                    </div>
+                  </div>
+                ))}
               </div>
               {previewPill}
               {dropHover && (

@@ -29,7 +29,7 @@ export default function Panel({ searchParams }: { searchParams?: { room?: string
 
   // владелец комнаты — доступ всегда
   if (owner === session.login) {
-    return <PanelClient channel={owner} room={room} />;
+    return <PanelClient channel={owner} room={room} userLogin={session.login} />;
   }
 
   // модератор: приглашение создаётся ТОЛЬКО стримером по нику в кабинете.
@@ -46,5 +46,5 @@ export default function Panel({ searchParams }: { searchParams?: { room?: string
     return accessSuspendedScreen(owner);
   }
 
-  return <PanelClient channel={owner} room={room} />;
+  return <PanelClient channel={owner} room={room} userLogin={session.login} />;
 }
