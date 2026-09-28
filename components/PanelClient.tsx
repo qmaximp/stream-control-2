@@ -1017,9 +1017,21 @@ export default function PanelClient({ channel, room }: { channel?: string | null
                   />
                 )}
                 {mounted && previewOn && channel && twitchLive === false && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
-                    <span className="text-sm font-medium text-gray-400">Канал не в эфире</span>
-                    <span className="text-[11px] text-gray-600">Превью включится автоматически, когда стример начнёт стрим</span>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 overflow-hidden px-2 text-center">
+                    {/* шрифт масштабируется вместе с канвасом: на сильном отдалении текст
+                        ужимается вместе с боксом, а не вылезает за его края */}
+                    <span
+                      className="font-medium text-gray-400"
+                      style={{ fontSize: Math.max(9, Math.min(16, state.canvasW * view.s * 0.035)), lineHeight: 1.2 }}
+                    >
+                      Канал не в эфире
+                    </span>
+                    <span
+                      className="text-gray-600"
+                      style={{ fontSize: Math.max(8, Math.min(12, state.canvasW * view.s * 0.026)), lineHeight: 1.2 }}
+                    >
+                      Превью включится автоматически, когда стример начнёт стрим
+                    </span>
                   </div>
                 )}
               </div>
