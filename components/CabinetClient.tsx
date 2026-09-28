@@ -275,13 +275,22 @@ export default function CabinetClient({ login, displayName, avatar, token: initi
                       </p>
                     </div>
                     {i.status === "pending" && (
-                      <button
-                        onClick={() => act({ action: "accept", owner: i.owner })}
-                        disabled={busy}
-                        className="px-4 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors disabled:opacity-50"
-                      >
-                        Принять приглашение
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => act({ action: "accept", owner: i.owner })}
+                          disabled={busy}
+                          className="px-4 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors disabled:opacity-50"
+                        >
+                          Принять приглашение
+                        </button>
+                        <button
+                          onClick={() => act({ action: "decline", owner: i.owner })}
+                          disabled={busy}
+                          className="px-3 py-2 text-xs text-red-400 border border-red-900/50 rounded-lg hover:bg-red-950/40 transition-colors disabled:opacity-50"
+                        >
+                          Отклонить
+                        </button>
+                      </div>
                     )}
                     {i.status === "accepted" && !i.suspended && i.token && (
                       <div className="flex items-center gap-2">
@@ -294,10 +303,11 @@ export default function CabinetClient({ login, displayName, avatar, token: initi
                           Открыть панель ↗
                         </a>
                         <button
-                          onClick={() => copy(`${origin}/panel?room=${i.token}`, "inv-" + i.owner)}
-                          className="px-3 py-2 bg-border hover:bg-gray-600 text-gray-300 text-xs rounded-lg transition-colors"
+                          onClick={() => act({ action: "decline", owner: i.owner })}
+                          disabled={busy}
+                          className="px-3 py-2 text-xs text-red-400 border border-red-900/50 rounded-lg hover:bg-red-950/40 transition-colors disabled:opacity-50"
                         >
-                          {copied === "inv-" + i.owner ? "Скопировано ✓" : "Копировать ссылку"}
+                          Отклонить
                         </button>
                       </div>
                     )}

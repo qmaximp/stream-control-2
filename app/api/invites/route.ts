@@ -71,6 +71,14 @@ export async function POST(req: Request) {
     return json({ ok: true });
   }
 
+  // модератор сам отклоняет приглашение или отсоединяется от панели
+  if (body.action === "decline") {
+    const owner = body.owner ?? "";
+    if (!getInviteStatus(owner, session.login)) return json({ error: "Приглашение не найдено" }, 404);
+    removeModerator(owner, session.login);
+    return json({ ok: true });
+  }
+
   // управление доступом — только владелец комнаты
   if (body.action === "suspend" || body.action === "resume" || body.action === "revoke") {
     const login = (body.login ?? "").trim().toLowerCase();
