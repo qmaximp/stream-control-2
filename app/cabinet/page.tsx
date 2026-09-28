@@ -1,6 +1,5 @@
 import { cookies, headers } from "next/headers";
 import { notRegisteredScreen, isValidRoomToken } from "@/lib/links";
-import { ensurePendingInvite, findOwnerByToken } from "@/lib/invites";
 import { tokenForLogin, verifySession } from "@/lib/session";
 import CabinetClient from "@/components/CabinetClient";
 
@@ -11,15 +10,10 @@ export default function Cabinet({ searchParams }: { searchParams?: { invite?: st
   const session = c ? verifySession(c.value) : null;
   if (!session) return notRegisteredScreen();
 
-  // модератор после входа по ссылке стримера (/cabinet?invite=<токен>): фиксируем
-  // приглашение в статусе pending — в кабинете появится карточка с кнопкой «Принять»
+  // ?invite=<токен> приходит после входа по ссылке стримера — кабинет открывается
+  // сразу на вкладке «Доступ к панели», где видно приглашение (выдаётся только по нику)
   const inviteToken = searchParams?.invite;
-  if (inviteToken && isValidRoomToken(inviteToken)) {
-    const owner = findOwnerByToken(inviteToken);
-    if (owner && owner !== session.login) {
-      ensurePendingInvite(owner, session.login);
-    }
-  }
+  const cameFromRoomLink = !!inviteToken && isValidRoomToken(inviteToken);
 
   const host = headers().get("host") || "localhost:3000";
   const forwardedProto = headers().get("x-forwarded-proto");
@@ -32,7 +26,7 @@ export default function Cabinet({ searchParams }: { searchParams?: { invite?: st
       avatar={session.avatar}
       token={tokenForLogin(session.login)}
       origin={`${proto}://${host}`}
-      defaultTab={inviteToken && isValidRoomToken(inviteToken) ? "access" : "links"}
+      defaultTab={cameFromRoomLink ? "access" : "links"}
     />
   );
 }

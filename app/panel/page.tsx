@@ -5,9 +5,10 @@ import {
   accessSuspendedScreen,
   invalidLinkScreen,
   isValidRoomToken,
+  noInviteScreen,
   notRegisteredScreen,
 } from "@/lib/links";
-import { ensurePendingInvite, findOwnerByToken, getInviteStatus } from "@/lib/invites";
+import { findOwnerByToken, getInviteStatus } from "@/lib/invites";
 import { verifySession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -20,7 +21,7 @@ export default function Panel({ searchParams }: { searchParams?: { room?: string
   }
 
   const session = verifySession(cookies().get("sc_session")?.value);
-  // не авторизован — после входа попадёт в кабинет, где будет висеть приглашение
+  // не авторизован — после входа попадёт в кабинет (приглашение выдаёт стример по нику)
   if (!session) return notRegisteredScreen(`/cabinet?invite=${encodeURIComponent(room)}`);
 
   const owner = findOwnerByToken(room);
@@ -31,11 +32,14 @@ export default function Panel({ searchParams }: { searchParams?: { room?: string
     return <PanelClient channel={owner} room={room} />;
   }
 
-  // модератор: доступ только по принятому приглашению
+  // модератор: приглашение создаётся ТОЛЬКО стримером по нику в кабинете.
+  // Просто открыв ссылку (даже угадав токен), доступ не получишь
   const entry = getInviteStatus(owner, session.login);
-  if (!entry || entry.status === "pending") {
-    ensurePendingInvite(owner, session.login);
-    // приглашение ждёт в личном кабинете (сразу на вкладке «Доступ к панели»)
+  if (!entry) {
+    return noInviteScreen(owner);
+  }
+  if (entry.status === "pending") {
+    // приглашён по нику — принимает в кабинете, сразу на вкладке «Доступ к панели»
     redirect(`/cabinet?invite=${encodeURIComponent(room)}`);
   }
   if (entry.suspended) {

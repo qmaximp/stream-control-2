@@ -257,7 +257,7 @@ export default function CabinetClient({ login, displayName, avatar, token: initi
             {invError && <p className="text-xs text-red-400 mb-3">{invError}</p>}
             {inv && inv.invites.length === 0 && (
               <p className="text-sm text-gray-500 mb-8">
-                Пока нет приглашений. Откройте ссылку панели стримера, войдите через Twitch — приглашение появится здесь.
+                Пока нет приглашений. Стример выдаёт доступ по нику Twitch: попросите его пригласить вас во вкладке «Доступ к панели» его кабинета — приглашение появится здесь.
               </p>
             )}
             <div className="space-y-3 mb-10">
