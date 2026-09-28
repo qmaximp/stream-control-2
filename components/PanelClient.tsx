@@ -21,6 +21,7 @@ export default function PanelClient({ channel, room }: { channel?: string | null
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [previewOn, setPreviewOn] = useState(false);
   const [previewKey, setPreviewKey] = useState(0);
+  const [twitchLive, setTwitchLive] = useState<boolean | null>(null);
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
   const parentHost = typeof window !== "undefined" ? window.location.hostname : "localhost";
@@ -56,7 +57,14 @@ export default function PanelClient({ channel, room }: { channel?: string | null
   useEffect(() => {
     setIsCoarse(window.matchMedia?.("(pointer: coarse)").matches || navigator.maxTouchPoints > 0);
   }, []);
-  const viewportRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  // канвас появляется/исчезает при повороте телефона — эффекты панорамы/зума должны
+  // перепривязываться к фактическому монтированию, а не только к первому рендеру
+  const [canvasEl, setCanvasEl] = useState<HTMLDivElement | null>(null);
+  const setViewportEl = useCallback((el: HTMLDivElement | null) => {
+    viewportRef.current = el;
+    setCanvasEl((prev) => (prev === el ? prev : el));
+  }, []);
   const baseViewRef = useRef<{ x: number; y: number; s: number } | null>(null);
   // свежий стейт для колбэков, замороженных useCallback'ом (паркинг считает каскад по актуальным элементам)
   const stateRef = useRef(state);
@@ -259,6 +267,9 @@ export default function PanelClient({ channel, room }: { channel?: string | null
 
   useEffect(() => {
     if (!previewOn || !channel || !mounted) return;
+    // канал заведомо не в эфире — вместо Twitch-плеера (у него поверх стрима свои
+    // надписи и постеры) показываем свой чистый плейсхолдер
+    if (twitchLive === false) return;
     const target = twitchPreviewRef.current;
     if (!target) return;
     let cancelled = false;
@@ -321,7 +332,7 @@ export default function PanelClient({ channel, room }: { channel?: string | null
       twitchPlayerRef.current = null;
       if (twitchPreviewRef.current) twitchPreviewRef.current.innerHTML = "";
     };
-  }, [previewOn, channel, mounted, previewKey, parentHost]);
+  }, [previewOn, channel, mounted, previewKey, parentHost, twitchLive]);
 
   // автоподгрузка стрима: если плеер был загружен в оффлайне, при выходе в эфир он остаётся
   // «на паузе» — по переходу offline→online перезагружаем плеер (сменив key у контейнера)
@@ -333,7 +344,9 @@ export default function PanelClient({ channel, room }: { channel?: string | null
       try {
         const res = await fetch(`/api/twitch-live?channel=${encodeURIComponent(channel)}`);
         const j = await res.json();
-        if (stopped || j?.live === null || j?.live === undefined) return;
+        if (stopped) return;
+        setTwitchLive(j?.live ?? null);
+        if (j?.live === null || j?.live === undefined) return;
         if (prev === false && j.live === true) setPreviewKey((k) => k + 1);
         prev = j.live;
       } catch {}
@@ -685,8 +698,10 @@ export default function PanelClient({ channel, room }: { channel?: string | null
     };
   }, [handleResizeMove, emit]);
 
+  // стартовый вид: считается при монтировании канваса (в т.ч. после поворота телефона
+  // из портретного экрана, где канваса нет)
   useEffect(() => {
-    const vp = viewportRef.current;
+    const vp = canvasEl;
     if (!vp || baseViewRef.current) return;
     if (!isMobileRef.current) {
       const s = Math.min((vp.clientWidth - 80) / state.canvasW, (vp.clientHeight - 80) / state.canvasH);
@@ -705,10 +720,10 @@ export default function PanelClient({ channel, room }: { channel?: string | null
     const base = { s, x: vp.clientWidth / 2 - cx * s, y: vp.clientHeight / 2 - cy * s };
     baseViewRef.current = base;
     setView(base);
-  }, [state.canvasW, state.canvasH]);
+  }, [canvasEl, state.canvasW, state.canvasH]);
 
   useEffect(() => {
-    const vp = viewportRef.current;
+    const vp = canvasEl;
     if (!vp) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
@@ -722,7 +737,7 @@ export default function PanelClient({ channel, room }: { channel?: string | null
     };
     vp.addEventListener("wheel", onWheel, { passive: false });
     return () => vp.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [canvasEl]);
 
   // кнопки зума −/+ : приближение к центру видимой области
   const zoomBy = useCallback((factor: number) => {
@@ -736,9 +751,10 @@ export default function PanelClient({ channel, room }: { channel?: string | null
   }, []);
 
   // панорама и щипок — единая pointer-реализация: работает одинаково мышью и пальцами
-  // на всех телефонах (старый вариант на touch-событиях вёл себя по-разному в разных браузерах)
+  // на всех телефонах (старый вариант на touch-событиях вёл себя по-разному в разных браузерах).
+  // Перепривязывается при монтировании канваса (поворот телефона из портретного экрана)
   useEffect(() => {
-    const vp = viewportRef.current;
+    const vp = canvasEl;
     if (!vp) return;
     const pointers = new Map<number, { x: number; y: number }>();
     let pan: { id: number; x: number; y: number; vx: number; vy: number } | null = null;
@@ -832,7 +848,7 @@ export default function PanelClient({ channel, room }: { channel?: string | null
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
     };
-  }, []);
+  }, [canvasEl]);
 
   // вертикальная ориентация телефона — просим повернуть (как на референсе)
   if (isPortrait) {
@@ -974,7 +990,7 @@ export default function PanelClient({ channel, room }: { channel?: string | null
 
           <div className="flex-1 flex flex-col bg-bg overflow-hidden">
             <div
-              ref={viewportRef}
+              ref={setViewportEl}
               className={`flex-1 relative overflow-hidden ${panning ? "cursor-grabbing" : ""}`}
               style={{
                 touchAction: "none",
@@ -992,13 +1008,19 @@ export default function PanelClient({ channel, room }: { channel?: string | null
                 style={{ left: view.x, top: view.y, width: state.canvasW * view.s, height: state.canvasH * view.s }}
               >
                 <div className="absolute inset-0 opacity-10" style={{ backgroundImage: "linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)", backgroundSize: `${40 * view.s}px ${40 * view.s}px` }} />
-                {mounted && previewOn && channel && (
+                {mounted && previewOn && channel && twitchLive !== false && (
                   <div
                     key={previewKey}
                     ref={twitchPreviewRef}
                     id="twitch-preview"
                     className="absolute inset-0"
                   />
+                )}
+                {mounted && previewOn && channel && twitchLive === false && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
+                    <span className="text-sm font-medium text-gray-400">Канал не в эфире</span>
+                    <span className="text-[11px] text-gray-600">Превью включится автоматически, когда стример начнёт стрим</span>
+                  </div>
                 )}
               </div>
               <div className="absolute left-0 top-0"
