@@ -516,6 +516,36 @@ export default function PanelClient({ channel, room }: { channel?: string | null
     if (url) addElement({ type: "video", src: url, ...p, width: 480, height: 270, text: "" });
   }, [addElement]);
 
+  // drag&drop из проводника: брошенный файл попадает в ЗОНУ ПРЕДЗАГРУЗКИ —
+  // так же, как при добавлении через кнопки (не на сам канвас с превью)
+  const [dropHover, setDropHover] = useState(false);
+  const dragDepth = useRef(0);
+  const isImageFile = (f: File) => f.type.startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(f.name);
+  const isVideoFile = (f: File) => f.type.startsWith("video/") || /\.(mp4|webm|mov|m4v|ogv)$/i.test(f.name);
+  // форматы, которые браузер не воспроизведёт (типичные записи OBS — mkv)
+  const UNPLAYABLE_VIDEO_RE = /\.(mkv|avi|flv|ts|wmv)$/i;
+  const handleDropFiles = useCallback(async (files: File[]) => {
+    for (const f of files) {
+      if (isImageFile(f)) {
+        const dataUrl = await fileToDataUrl(f);
+        const size = await getImageSize(dataUrl);
+        const k = Math.min(1, 1280 / Math.max(size.w, size.h));
+        const w = Math.round(size.w * k), h = Math.round(size.h * k);
+        const p = parkingSpot(w, h);
+        addElement({ type: "image", src: dataUrl, ...p, width: w, height: h, text: "" });
+      } else if (isVideoFile(f)) {
+        if (f.size > 40 * 1024 * 1024) { alert(`«${f.name}» больше 40 МБ — добавьте видео по ссылке.`); continue; }
+        const dataUrl = await fileToDataUrl(f);
+        const p = parkingSpot(480, 270);
+        addElement({ type: "video", src: dataUrl, ...p, width: 480, height: 270, text: "" });
+      } else if (UNPLAYABLE_VIDEO_RE.test(f.name)) {
+        alert(`«${f.name}» — браузер не воспроизводит этот формат (частый случай у записей OBS). Конвертируйте в MP4/WebM или добавьте по ссылке.`);
+      } else {
+        alert(`«${f.name}» — это не картинка и не видео.`);
+      }
+    }
+  }, [addElement]);
+
   const addIframeEl = useCallback(() => {
     const p = parkingSpot(560, 315);
     const url = prompt("Ссылка на сайт или YouTube (например, https://youtube.com/watch?v=...):");
@@ -1002,6 +1032,30 @@ export default function PanelClient({ channel, room }: { channel?: string | null
                 backgroundPosition: `${view.x}px ${view.y}px`,
               }}
               onClick={(e) => { if (e.target === e.currentTarget) { setSelectedId(null); setInteractiveIframeId(null); } }}
+              onDragEnter={(e) => { e.preventDefault(); dragDepth.current += 1; setDropHover(true); }}
+              onDragOver={(e) => { e.preventDefault(); if (!dropHover) setDropHover(true); }}
+              onDragLeave={(e) => {
+                dragDepth.current = Math.max(0, dragDepth.current - 1);
+                if (dragDepth.current === 0) setDropHover(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                dragDepth.current = 0;
+                setDropHover(false);
+                if (e.dataTransfer.files?.length) {
+                  void handleDropFiles([...e.dataTransfer.files]);
+                  return;
+                }
+                // перетаскивание картинки-ссылки из браузера — тоже в зону предзагрузки
+                const url = (e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain")).trim();
+                if (/^https?:\/\//i.test(url)) {
+                  void getImageSize(url).then((size) => {
+                    const k = Math.min(1, 1280 / Math.max(size.w, size.h));
+                    const p = parkingSpot(Math.round(size.w * k), Math.round(size.h * k));
+                    addElement({ type: "image", src: url, ...p, width: Math.round(size.w * k), height: Math.round(size.h * k), text: "" });
+                  });
+                }
+              }}
             >
               {/* фон канваса + превью: ВНЕ transform-контейнера (transform предка блокирует
                   автовоспроизведение Twitch-плеера), позиционируем в экранных координатах view */}
@@ -1124,6 +1178,13 @@ export default function PanelClient({ channel, room }: { channel?: string | null
                 })}
               </div>
               {previewPill}
+              {dropHover && (
+                <div className="absolute inset-0 z-30 pointer-events-none flex items-center justify-center bg-black/40 border-2 border-dashed border-accent rounded-lg">
+                  <span className="text-sm text-gray-200 bg-panel/95 border border-border px-4 py-2 rounded-lg">
+                    Отпустите файл — картинка, гифка или видео добавятся на канвас
+                  </span>
+                </div>
+              )}
               {isMobile ? (
                 // мобильный: левый нижний угол — «− +» в ряд (шириной с «Сбросить»), «Сбросить» под ними
                 <div className="absolute left-4 bottom-3 z-10 flex flex-col items-stretch gap-1.5" data-nopan="1" onPointerDown={(e) => e.stopPropagation()}>
