@@ -864,6 +864,8 @@ export default function PanelClient({ channel, room }: { channel?: string | null
   }
 
   // пилюля Превью: на ПК и мобильном — закреплена в правом нижнем углу окна превью
+  // ширина канваса на экране — от неё зависит, какой текст плейсхолдера помещается
+  const previewBoxW = state.canvasW * view.s;
   const previewPill = (
     <div
       className="absolute right-4 bottom-3 z-10 flex items-center gap-2 bg-panel border border-border rounded-full pl-3 pr-3 py-1.5 pointer-events-auto"
@@ -1016,22 +1018,24 @@ export default function PanelClient({ channel, room }: { channel?: string | null
                     className="absolute inset-0"
                   />
                 )}
-                {mounted && previewOn && channel && twitchLive === false && (
+                {mounted && previewOn && channel && twitchLive === false && previewBoxW >= 180 && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 overflow-hidden px-2 text-center">
-                    {/* шрифт масштабируется вместе с канвасом: на сильном отдалении текст
-                        ужимается вместе с боксом, а не вылезает за его края */}
+                    {/* шрифт масштабируется вместе с канвасом; при сильном отдалении текст
+                        сначала укорачивается до «Не в эфире», затем скрывается совсем */}
                     <span
                       className="font-medium text-gray-400"
-                      style={{ fontSize: Math.max(9, Math.min(16, state.canvasW * view.s * 0.035)), lineHeight: 1.2 }}
+                      style={{ fontSize: Math.max(8, Math.min(16, previewBoxW * 0.035)), lineHeight: 1.2 }}
                     >
-                      Канал не в эфире
+                      {previewBoxW >= 380 ? "Канал не в эфире" : "Не в эфире"}
                     </span>
-                    <span
-                      className="text-gray-600"
-                      style={{ fontSize: Math.max(8, Math.min(12, state.canvasW * view.s * 0.026)), lineHeight: 1.2 }}
-                    >
-                      Превью включится автоматически, когда стример начнёт стрим
-                    </span>
+                    {previewBoxW >= 380 && (
+                      <span
+                        className="text-gray-600"
+                        style={{ fontSize: Math.max(8, Math.min(12, previewBoxW * 0.026)), lineHeight: 1.2 }}
+                      >
+                        Превью включится автоматически, когда стример начнёт стрим
+                      </span>
+                    )}
                   </div>
                 )}
               </div>
