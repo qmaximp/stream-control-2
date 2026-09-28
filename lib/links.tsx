@@ -88,3 +88,25 @@ export function invalidLinkScreen(): React.ReactNode {
     </main>
   );
 }
+
+// экран «доступ временно отключён стримером» (модератор, попавший под suspend)
+export function accessSuspendedScreen(ownerLogin: string): React.ReactNode {
+  return (
+    <main className="min-h-screen bg-bg flex flex-col items-center justify-center px-4 text-center">
+      <div className="bg-panel border border-border rounded-2xl p-8 max-w-sm w-full">
+        <div className="text-5xl mb-4">🔒</div>
+        <h1 className="text-lg font-semibold text-white mb-2">Доступ временно отключён</h1>
+        <p className="text-sm text-gray-400 mb-6">
+          Стример <span className="text-gray-200">{ownerLogin}</span> приостановил ваш доступ к панели.
+          Напишите ему, чтобы вернуть.
+        </p>
+        <a
+          href="/cabinet"
+          className="inline-block px-6 py-3 rounded-lg bg-accent hover:bg-violet-700 text-white text-sm transition-colors"
+        >
+          В личный кабинет
+        </a>
+      </div>
+    </main>
+  );
+}

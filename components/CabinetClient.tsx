@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 function TwitchIcon({ size = 20 }: { size?: number }) {
   return (
@@ -10,19 +10,51 @@ function TwitchIcon({ size = 20 }: { size?: number }) {
   );
 }
 
+type InviteStatus = "pending" | "accepted";
+
+type Invite = {
+  owner: string;
+  status: InviteStatus;
+  suspended: boolean;
+  token: string | null;
+};
+
+type Moderator = {
+  login: string;
+  status: InviteStatus;
+  suspended: boolean;
+  invitedAt: string;
+  visitedAt?: string;
+  acceptedAt?: string;
+};
+
+type InvitesPayload = {
+  invites: Invite[];
+  moderators: Moderator[];
+  roomToken: string | null;
+};
+
 interface CabinetClientProps {
   login: string;
   displayName: string;
   avatar?: string;
   token: string | null;
   origin: string;
+  // после входа по ссылке стримера кабинет открывается сразу на вкладке доступа
+  defaultTab?: "links" | "access";
 }
 
-export default function CabinetClient({ login, displayName, avatar, token: initialToken, origin }: CabinetClientProps) {
+export default function CabinetClient({ login, displayName, avatar, token: initialToken, origin, defaultTab = "links" }: CabinetClientProps) {
   const [token, setToken] = useState<string | null>(initialToken);
   const [loaded, setLoaded] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // вкладки кабинета: ссылки / доступ к панели (инвайты)
+  const [tab, setTab] = useState<"links" | "access">(defaultTab);
+  const [inv, setInv] = useState<InvitesPayload | null>(null);
+  const [invError, setInvError] = useState("");
+  const [inviteNick, setInviteNick] = useState("");
 
   // подтягиваем сохранённые ссылки при загрузке страницы
   useEffect(() => {
@@ -32,6 +64,54 @@ export default function CabinetClient({ login, displayName, avatar, token: initi
       .catch(() => {})
       .finally(() => setLoaded(true));
   }, []);
+
+  const loadInvites = useCallback(() => {
+    setInvError("");
+    fetch("/api/invites")
+      .then(async (r) => {
+        const d = await r.json();
+        if (!r.ok) throw new Error(d?.error || "Ошибка загрузки");
+        setInv(d);
+      })
+      .catch((e) => setInvError(e?.message || "Не удалось загрузить доступы"));
+  }, []);
+
+  useEffect(() => { loadInvites(); }, [loadInvites]);
+
+  // живое обновление: статусы инвайтов и модераторов подтягиваются без перезагрузки страницы
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") loadInvites();
+    }, 5000);
+    return () => clearInterval(t);
+  }, [loadInvites]);
+
+  const act = useCallback(async (payload: Record<string, string>) => {
+    setBusy(true);
+    setInvError("");
+    try {
+      const r = await fetch("/api/invites", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d?.error || "Ошибка");
+      loadInvites();
+      return true;
+    } catch (e: any) {
+      setInvError(e?.message || "Ошибка");
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }, [loadInvites]);
+
+  const doInvite = async () => {
+    if (!inviteNick.trim()) return;
+    const ok = await act({ action: "invite", login: inviteNick.trim() });
+    if (ok) setInviteNick("");
+  };
 
   const generate = async () => {
     setBusy(true);
@@ -84,6 +164,31 @@ export default function CabinetClient({ login, displayName, avatar, token: initi
     </div>
   );
 
+  const tabBtn = (id: "links" | "access", label: string) => (
+    <button
+      onClick={() => setTab(id)}
+      className={`px-4 py-2 text-sm rounded-lg transition-colors ${tab === id ? "bg-accent text-white" : "bg-border text-gray-300 hover:bg-gray-600"}`}
+    >
+      {label}
+    </button>
+  );
+
+  const statusCls = (m: Moderator) =>
+    m.status === "pending"
+      ? "text-amber-400"
+      : m.suspended
+        ? "text-red-400"
+        : "text-green-400";
+
+  const statusText = (m: Moderator) =>
+    m.status === "pending"
+      ? m.visitedAt
+        ? "Ждёт подтверждения"
+        : "Приглашён (ещё не заходил)"
+      : m.suspended
+        ? "Отключён временно"
+        : "Доступ открыт";
+
   return (
     <main className="min-h-screen bg-bg">
       <header className="flex items-center justify-between px-5 py-3 bg-panel border-b border-border">
@@ -107,33 +212,162 @@ export default function CabinetClient({ login, displayName, avatar, token: initi
 
       <div className="max-w-3xl mx-auto px-6 pt-10 pb-8">
         <h1 className="text-2xl font-semibold text-white mb-2">Личный кабинет</h1>
-        <p className="text-base text-gray-400 mb-8">
+        <p className="text-base text-gray-400 mb-6">
           Аккаунт Twitch: <span className="text-gray-200">{login}</span>
         </p>
 
-        {!loaded ? null : !links ? (
-          <button
-            onClick={generate}
-            disabled={busy}
-            className="px-4 py-2.5 bg-accent hover:bg-violet-700 text-white rounded-lg text-base transition-colors disabled:opacity-50"
-          >
-            {busy ? "Генерация…" : "Сгенерировать ссылки"}
-          </button>
-        ) : (
-          <div className="space-y-5">
-            <p className="text-xs text-gray-600">
-              Ссылки привязаны к аккаунту <span className="text-gray-400">{login}</span>.
-            </p>
-            {linkBlock("Панель для модераторов", links.panel, "panel")}
-            {linkBlock("Оверлей для OBS", links.overlay, "overlay")}
-            <button
-              onClick={generate}
-              disabled={busy}
-              className="text-xs text-gray-500 hover:text-gray-300 transition-colors underline disabled:opacity-50"
-            >
-              {busy ? "Генерация…" : "Сгенерировать заново (старые ссылки перестанут работать)"}
-            </button>
-          </div>
+        <div className="flex gap-2 mb-8">
+          {tabBtn("links", "Мои ссылки")}
+          {tabBtn("access", "Доступ к панели")}
+        </div>
+
+        {tab === "links" && (
+          <>
+            {!loaded ? null : !links ? (
+              <button
+                onClick={generate}
+                disabled={busy}
+                className="px-4 py-2.5 bg-accent hover:bg-violet-700 text-white rounded-lg text-base transition-colors disabled:opacity-50"
+              >
+                {busy ? "Генерация…" : "Сгенерировать ссылки"}
+              </button>
+            ) : (
+              <div className="space-y-5">
+                <p className="text-xs text-gray-600">
+                  Ссылки привязаны к аккаунту <span className="text-gray-400">{login}</span>.
+                </p>
+                {linkBlock("Панель для модераторов", links.panel, "panel")}
+                {linkBlock("Оверлей для OBS", links.overlay, "overlay")}
+                <button
+                  onClick={generate}
+                  disabled={busy}
+                  className="text-xs text-gray-500 hover:text-gray-300 transition-colors underline disabled:opacity-50"
+                >
+                  {busy ? "Генерация…" : "Сгенерировать заново (старые ссылки перестанут работать, ссылки у модераторов обновятся автоматически)"}
+                </button>
+              </div>
+            )}
+          </>
+        )}
+
+        {tab === "access" && (
+          <>
+            {/* приглашения, выданные этому аккаунту другими стримерами */}
+            <h2 className="text-sm text-gray-500 uppercase tracking-wide mb-3">Приглашения</h2>
+            {invError && <p className="text-xs text-red-400 mb-3">{invError}</p>}
+            {inv && inv.invites.length === 0 && (
+              <p className="text-sm text-gray-500 mb-8">
+                Пока нет приглашений. Откройте ссылку панели стримера, войдите через Twitch — приглашение появится здесь.
+              </p>
+            )}
+            <div className="space-y-3 mb-10">
+              {inv?.invites.map((i) => (
+                <div key={i.owner} className="bg-panel border border-border rounded-xl p-4">
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <p className="text-sm text-gray-200">Стример: <span className="font-medium">{i.owner}</span></p>
+                      <p className={`text-xs mt-1 ${i.status === "pending" ? "text-amber-400" : i.suspended ? "text-red-400" : "text-green-400"}`}>
+                        {i.status === "pending"
+                          ? "Ждёт твоего подтверждения"
+                          : i.suspended
+                            ? "Доступ временно отключён стримером"
+                            : "Доступ открыт"}
+                      </p>
+                    </div>
+                    {i.status === "pending" && (
+                      <button
+                        onClick={() => act({ action: "accept", owner: i.owner })}
+                        disabled={busy}
+                        className="px-4 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        Принять приглашение
+                      </button>
+                    )}
+                    {i.status === "accepted" && !i.suspended && i.token && (
+                      <div className="flex items-center gap-2">
+                        <a
+                          href={`${origin}/panel?room=${i.token}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-4 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors"
+                        >
+                          Открыть панель ↗
+                        </a>
+                        <button
+                          onClick={() => copy(`${origin}/panel?room=${i.token}`, "inv-" + i.owner)}
+                          className="px-3 py-2 bg-border hover:bg-gray-600 text-gray-300 text-xs rounded-lg transition-colors"
+                        >
+                          {copied === "inv-" + i.owner ? "Скопировано ✓" : "Копировать ссылку"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* модераторы собственной панели этого аккаунта */}
+            <h2 className="text-sm text-gray-500 uppercase tracking-wide mb-3">Модераторы моей панели</h2>
+            {!inv?.roomToken ? (
+              <p className="text-sm text-gray-500">
+                Сначала сгенерируйте ссылки во вкладке «Мои ссылки» — панель должна существовать.
+              </p>
+            ) : (
+              <>
+                <p className="text-xs text-gray-600 mb-3 break-all">
+                  Ссылка для приглашённых: <span className="text-gray-400">{origin}/panel?room={inv.roomToken}</span>
+                </p>
+                <div className="flex gap-2 mb-2">
+                  <input
+                    value={inviteNick}
+                    onChange={(e) => setInviteNick(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") doInvite(); }}
+                    placeholder="Ник Twitch (например, jettle_)"
+                    className="flex-1 px-3 py-2 bg-bg border border-border rounded-lg text-sm"
+                  />
+                  <button
+                    onClick={doInvite}
+                    disabled={busy || !inviteNick.trim()}
+                    className="px-4 py-2 bg-accent hover:bg-violet-700 text-white text-sm rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    Пригласить
+                  </button>
+                </div>
+                {invError && <p className="text-xs text-red-400 mb-3">{invError}</p>}
+                <div className="space-y-2">
+                  {inv.moderators.length === 0 && (
+                    <p className="text-sm text-gray-500">Модераторов ещё нет. Пригласите по нику или отправьте ссылку — приглашение появится, когда модератор войдёт.</p>
+                  )}
+                  {inv.moderators.map((m) => (
+                    <div key={m.login} className="flex items-center justify-between gap-3 bg-panel border border-border rounded-lg px-3 py-2 flex-wrap">
+                      <div>
+                        <p className="text-sm text-gray-200">{m.login}</p>
+                        <p className={`text-xs ${statusCls(m)}`}>{statusText(m)}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {m.status === "accepted" && (
+                          <button
+                            onClick={() => act({ action: m.suspended ? "resume" : "suspend", login: m.login })}
+                            disabled={busy}
+                            className="px-3 py-1.5 text-xs bg-border hover:bg-gray-600 text-gray-300 rounded-lg transition-colors disabled:opacity-50"
+                          >
+                            {m.suspended ? "Включить" : "Отключить временно"}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => act({ action: "revoke", login: m.login })}
+                          disabled={busy}
+                          className="px-3 py-1.5 text-xs text-red-400 border border-red-900/50 rounded-lg hover:bg-red-950/40 transition-colors disabled:opacity-50"
+                        >
+                          Забрать доступ
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </>
         )}
       </div>
 
