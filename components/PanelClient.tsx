@@ -339,12 +339,16 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   // поэтому после READY/PAUSE/OFFLINE→ONLINE принудительно запускаем воспроизведение
   const twitchPreviewRef = useRef<HTMLDivElement | null>(null);
   const twitchPlayerRef = useRef<any>(null);
+  // живой плеер прячется, когда канвас на экране уже 180px (иначе микроплеер ломается)
+  const [playerActive, setPlayerActive] = useState(true);
 
   useEffect(() => {
     if (!previewOn || !channel || !mounted) return;
     // канал заведомо не в эфире — вместо Twitch-плеера (у него поверх стрима свои
     // надписи и постеры) показываем свой чистый плейсхолдер
     if (twitchLive === false) return;
+    // холст сильно отдалён — плеер в микроразмере ломается, не рендерим его вовсе
+    if (!playerActive) return;
     const target = twitchPreviewRef.current;
     if (!target) return;
     let cancelled = false;
@@ -407,7 +411,7 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
       twitchPlayerRef.current = null;
       if (twitchPreviewRef.current) twitchPreviewRef.current.innerHTML = "";
     };
-  }, [previewOn, channel, mounted, previewKey, parentHost, twitchLive]);
+  }, [previewOn, channel, mounted, previewKey, parentHost, twitchLive, playerActive]);
 
   // статус эфира: пока показан плейсхолдер «не в эфире» — опрашиваем каждые 15 секунд,
   // когда стрим играется — раз в минуту. Значение меняется только на точно известное
@@ -982,6 +986,11 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   // пилюля Превью: на ПК и мобильном — закреплена в правом нижнем углу окна превью
   // ширина канваса на экране — от неё зависит, какой текст плейсхолдера помещается
   const previewBoxW = state.canvasW * view.s;
+  // гистерезис 180/220px, чтобы плеер не мигал на границе порога
+  useEffect(() => {
+    if (previewBoxW < 180) setPlayerActive(false);
+    else if (previewBoxW > 220) setPlayerActive(true);
+  }, [previewBoxW]);
   const previewPill = (
     <div
       className="absolute right-4 bottom-3 z-10 flex items-center gap-2 bg-panel border border-border rounded-full pl-3 pr-3 py-1.5 pointer-events-auto"
@@ -1150,13 +1159,29 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
                 style={{ left: view.x, top: view.y, width: state.canvasW * view.s, height: state.canvasH * view.s }}
               >
                 <div className="absolute inset-0 opacity-10" style={{ backgroundImage: "linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)", backgroundSize: `${40 * view.s}px ${40 * view.s}px` }} />
-                {mounted && previewOn && channel && twitchLive !== false && (
+                {mounted && previewOn && channel && twitchLive !== false && playerActive && (
                   <div
                     key={previewKey}
                     ref={twitchPreviewRef}
                     id="twitch-preview"
                     className="absolute inset-0"
                   />
+                )}
+                {/* холст сильно отдалён: вместо сломанного микроплеера — чистый бейдж LIVE */}
+                {mounted && previewOn && channel && twitchLive !== false && !playerActive && (
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <span
+                      className="flex items-center rounded-md bg-black/75 text-white font-bold tracking-wide"
+                      style={{
+                        gap: Math.max(2, Math.min(6, previewBoxW * 0.012)),
+                        padding: `${Math.max(2, Math.min(6, previewBoxW * 0.012))}px ${Math.max(4, Math.min(10, previewBoxW * 0.02))}px`,
+                        fontSize: Math.max(7, Math.min(14, previewBoxW * 0.035)),
+                      }}
+                    >
+                      <span className="rounded-full bg-red-600" style={{ width: Math.max(4, Math.min(10, previewBoxW * 0.02)), height: Math.max(4, Math.min(10, previewBoxW * 0.02)) }} />
+                      LIVE
+                    </span>
+                  </div>
                 )}
                 {mounted && previewOn && channel && twitchLive === false && previewBoxW >= 180 && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 overflow-hidden px-2 text-center">
