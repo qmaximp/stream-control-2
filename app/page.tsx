@@ -45,6 +45,18 @@ export default function Home({ searchParams }: { searchParams?: { error?: string
       >
         💜 Поддержать проект
       </a>
+
+      <footer className="mt-auto pb-6 pt-10 text-center text-xs text-gray-600">
+        <a
+          href="https://github.com/qmaximp/stream-control-2"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-accent2 hover:underline"
+        >
+          github
+        </a>
+        {" проекта | версия 1.1"}
+      </footer>
     </main>
   );
 }

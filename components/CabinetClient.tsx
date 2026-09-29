@@ -391,6 +391,17 @@ export default function CabinetClient({ login, displayName, avatar, token: initi
           💜 Поддержать проект
         </a>
         <p className="text-[11px] text-gray-600 mt-3">Ovrly развивается бесплатно — поддержка очень помогает</p>
+        <p className="text-[11px] text-gray-600 mt-2">
+          <a
+            href="https://github.com/qmaximp/stream-control-2"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-accent2 hover:underline"
+          >
+            github
+          </a>
+          {" проекта | версия 1.1"}
+        </p>
       </footer>
     </main>
   );
