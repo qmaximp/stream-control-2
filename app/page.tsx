@@ -10,7 +10,7 @@ export default function Home({ searchParams }: { searchParams?: { error?: string
   const error = searchParams?.error;
 
   return (
-    <main className="min-h-screen bg-bg flex flex-col items-center justify-center px-4">
+    <main className="min-h-screen bg-bg flex flex-col items-center justify-center px-4 relative">
       <div className="flex items-center gap-3 mb-3">
         <LogoMark size={44} />
         <h1 className="text-2xl font-semibold text-white">Ovrly</h1>
@@ -46,7 +46,7 @@ export default function Home({ searchParams }: { searchParams?: { error?: string
         💜 Поддержать проект
       </a>
 
-      <footer className="mt-auto pb-6 pt-10 text-center text-xs text-gray-600">
+      <footer className="absolute bottom-5 left-0 right-0 text-center text-xs text-gray-600">
         <a
           href="https://github.com/qmaximp/stream-control-2"
           target="_blank"

@@ -190,7 +190,7 @@ export default function CabinetClient({ login, displayName, avatar, token: initi
         : "Доступ открыт";
 
   return (
-    <main className="min-h-screen bg-bg">
+    <main className="min-h-screen bg-bg flex flex-col">
       <header className="flex items-center justify-between px-5 py-3 bg-panel border-b border-border">
         <div className="flex items-center gap-3">
           <span className="text-sm text-gray-200 font-medium">{displayName}</span>
@@ -210,7 +210,7 @@ export default function CabinetClient({ login, displayName, avatar, token: initi
         </a>
       </header>
 
-      <div className="max-w-3xl mx-auto px-6 pt-10 pb-8">
+      <div className="max-w-3xl mx-auto px-6 pt-10 pb-8 w-full flex-1">
         <h1 className="text-2xl font-semibold text-white mb-2">Личный кабинет</h1>
         <p className="text-base text-gray-400 mb-6">
           Аккаунт Twitch: <span className="text-gray-200">{login}</span>
