@@ -72,17 +72,37 @@ app.prepare().then(() => {
 
     // живые курсоры: ретрансляция позиции мыши другим участникам комнаты.
     // Логин берём из handshake (?login=) — данные косметические, авторизация не нужна
-    const cursorLogin = ((socket.handshake.query.login || 'гость') + '').slice(0, 40);
+    const userLogin = ((socket.handshake.query.login || 'гость') + '').slice(0, 40);
+    roomRec.locks = roomRec.locks ?? new Map(); // id элемента -> { socketId, login, until }
+    console.log('[io] connect:', socket.id, 'room:', room, 'login:', userLogin);
 
     socket.on('cursor:move', (data) => {
       if (!data || typeof data.x !== 'number' || typeof data.y !== 'number' || !isFinite(data.x) || !isFinite(data.y)) return;
       const x = Math.max(-100000, Math.min(100000, data.x));
       const y = Math.max(-100000, Math.min(100000, data.y));
-      socket.broadcast.to(room).emit('cursor:update', { id: socket.id, login: cursorLogin, x, y, hidden: !!data.hidden });
+      socket.broadcast.to(room).emit('cursor:update', { id: socket.id, login: userLogin, x, y, hidden: !!data.hidden });
+    });
+
+    // блокировка объекта на время перетаскивания: пока один тащит, другой перехватить не может;
+    // лок живёт 5 секунд после последнего движения (после остановки — ещё 5 секунд и свободно)
+    socket.on('element:grab', ({ id } = {}) => {
+      if (!state.elements.some((e) => e.id === id)) return;
+      const now = Date.now();
+      const lock = roomRec.locks.get(id);
+      if (lock && lock.socketId !== socket.id && now < lock.until) return; // занято другим
+      roomRec.locks.set(id, { socketId: socket.id, login: userLogin, until: now + 5000 });
+      io.to(room).emit('element:lock', { id, by: userLogin, until: now + 5000 });
     });
 
     socket.on('disconnect', () => {
       io.to(room).emit('cursor:leave', { id: socket.id });
+      // снимаем локи отключившегося
+      for (const [id, lock] of roomRec.locks) {
+        if (lock.socketId === socket.id) {
+          roomRec.locks.delete(id);
+          io.to(room).emit('element:unlock', { id });
+        }
+      }
     });
 
     socket.on('canvas:resize', (dims) => {
@@ -110,6 +130,10 @@ app.prepare().then(() => {
     socket.on('element:move', (data) => {
       const idx = state.elements.findIndex(e => e.id === data.id);
       if (idx >= 0) {
+        const lock = roomRec.locks.get(data.id);
+        const now = Date.now();
+        if (lock && lock.socketId !== socket.id && now < lock.until) return; // объект тащит другой
+        if (lock && lock.socketId === socket.id) lock.until = now + 5000; // продлеваем лок, пока тащат
         state.elements[idx].x = data.x;
         state.elements[idx].y = data.y;
         socket.broadcast.to(room).emit('element:moved', data);
@@ -119,6 +143,10 @@ app.prepare().then(() => {
     socket.on('element:resize', (data) => {
       const idx = state.elements.findIndex(e => e.id === data.id);
       if (idx >= 0) {
+        const lock = roomRec.locks.get(data.id);
+        const now = Date.now();
+        if (lock && lock.socketId !== socket.id && now < lock.until) return; // объект тащит другой
+        if (lock && lock.socketId === socket.id) lock.until = now + 5000;
         const el = state.elements[idx];
         if (data.x !== undefined) el.x = data.x;
         if (data.y !== undefined) el.y = data.y;

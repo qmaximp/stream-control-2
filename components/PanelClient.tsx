@@ -56,6 +56,12 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   type RemoteCursor = { id: string; login: string; x: number; y: number; hidden: boolean; t: number };
   const [remoteCursors, setRemoteCursors] = useState<RemoteCursor[]>([]);
   const cursorLastSent = useRef(0);
+  // локи объектов: пока один тащит, другой перехватить не может; +5 секунд после остановки
+  const [elementLocks, setElementLocks] = useState<Record<string, { by: string; until: number }>>({});
+  const isLockedByOther = useCallback((id: string) => {
+    const l = elementLocks[id];
+    return !!l && l.until > Date.now() && l.by !== (userLogin ?? "");
+  }, [elementLocks, userLogin]);
   const [isCoarse, setIsCoarse] = useState(false);
   useEffect(() => {
     setIsCoarse(window.matchMedia?.("(pointer: coarse)").matches || navigator.maxTouchPoints > 0);
@@ -117,6 +123,7 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   useEffect(() => {
     const socket = ioInit({ transports: ["websocket", "polling"], query: { room: room || "default", login: userLogin || "" } });
     socketRef.current = socket;
+    (window as any).__ovrlySocket = socket; // TODO: убрать после отладки
 
     // живые курсоры других пользователей этой комнаты
     socket.on("cursor:update", (c: { id: string; login: string; x: number; y: number; hidden?: boolean }) => {
@@ -128,6 +135,17 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
     });
     socket.on("cursor:leave", ({ id }: { id: string }) => {
       setRemoteCursors((prev) => prev.filter((p) => p.id !== id));
+    });
+    socket.on("element:lock", ({ id, by, until }: { id: string; by: string; until: number }) => {
+      setElementLocks((prev) => ({ ...prev, [id]: { by, until } }));
+    });
+    socket.on("element:unlock", ({ id }: { id: string }) => {
+      setElementLocks((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
     });
 
     socket.on("connect", () => setConnected(true));
@@ -173,10 +191,20 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
     return () => { socket.disconnect(); };
   }, [room, userLogin]);
 
-  // курсоры пропадают, если участник перестал двигать мышью или отключился
+  // курсоры пропадают, если участник перестал двигать мышью или отключился;
+  // локи объектов чистятся по истечении TTL
   useEffect(() => {
     const t = setInterval(() => {
       setRemoteCursors((prev) => (prev.some((p) => Date.now() - p.t > 5000) ? prev.filter((p) => Date.now() - p.t <= 5000) : prev));
+      setElementLocks((prev) => {
+        const next: typeof prev = {};
+        let changed = false;
+        for (const [id, l] of Object.entries(prev)) {
+          if (l.until > Date.now()) next[id] = l;
+          else changed = true;
+        }
+        return changed ? next : prev;
+      });
     }, 3000);
     return () => clearInterval(t);
   }, []);
@@ -381,8 +409,8 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
     };
   }, [previewOn, channel, mounted, previewKey, parentHost, twitchLive]);
 
-  // автоподгрузка стрима: если плеер был загружен в оффлайне, при выходе в эфир он остаётся
-  // «на паузе» — по переходу offline→online перезагружаем плеер (сменив key у контейнера)
+  // статус эфира: пока показан плейсхолдер «не в эфире» — опрашиваем каждые 15 секунд,
+  // когда стрим играется — раз в минуту. Значение меняется только на точно известное
   useEffect(() => {
     if (!previewOn || !channel) return;
     let stopped = false;
@@ -392,16 +420,21 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
         const res = await fetch(`/api/twitch-live?channel=${encodeURIComponent(channel)}`);
         const j = await res.json();
         if (stopped) return;
-        setTwitchLive(j?.live ?? null);
-        if (j?.live === null || j?.live === undefined) return;
+        if (j?.live !== true && j?.live !== false) return; // неизвестно (нет ключей/сеть) — ничего не меняем
+        setTwitchLive(j.live);
         if (prev === false && j.live === true) setPreviewKey((k) => k + 1);
         prev = j.live;
       } catch {}
     };
     tick();
-    const t = setInterval(tick, 60000);
-    return () => { stopped = true; clearInterval(t); };
-  }, [previewOn, channel]);
+    let t: ReturnType<typeof setInterval> | null = null;
+    const schedule = () => {
+      t = setInterval(tick, twitchLive === false ? 15000 : 60000);
+    };
+    schedule();
+    return () => { stopped = true; if (t) clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewOn, channel, twitchLive === false]);
 
   const addElement = useCallback(
     (el: Omit<StreamElement, "id" | "zIndex" | "visible">) => {
@@ -432,8 +465,10 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   const rotateRef = useRef<{ el: StreamElement; cx: number; cy: number; startAngle: number; startRotation: number } | null>(null);
 
   const handleRotateStart = useCallback((e: React.PointerEvent, el: StreamElement) => {
+    if (isLockedByOther(el.id)) return;
     e.preventDefault();
     e.stopPropagation();
+    emit("element:grab", { id: el.id });
     if (!viewportRef.current) return;
     const rect = viewportRef.current.getBoundingClientRect();
     const { x: vx, y: vy, s } = viewRef.current;
@@ -455,7 +490,7 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
     if (e.shiftKey) rot = Math.round(rot / 15) * 15; // шаг 15° с зажатым Shift
     else rot = Math.round(rot);
     updateElement(r.el.id, { rotation: rot });
-  }, [updateElement]);
+  }, [updateElement, isLockedByOther, emit]);
 
   useEffect(() => {
     const fn = () => { rotateRef.current = null; };
@@ -615,8 +650,10 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   const handleDragStart = (e: React.PointerEvent, el: StreamElement) => {
     if (el.locked) return;
     if (e.button !== 0) return;
+    if (isLockedByOther(el.id)) return; // объект тащит другой модератор
     e.preventDefault();
     e.stopPropagation();
+    emit("element:grab", { id: el.id });
     const { x: vx, y: vy, s } = viewRef.current;
     const rect = viewportRef.current!.getBoundingClientRect();
     const lx = (e.clientX - rect.left - vx) / s;
@@ -698,8 +735,10 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   const lastResizeRef = useRef<{ id: string; x: number; y: number; width: number; height: number } | null>(null);
 
   const handleResizeStart = (e: React.PointerEvent, el: StreamElement, dir: string) => {
+    if (isLockedByOther(el.id)) return;
     e.preventDefault();
     e.stopPropagation();
+    emit("element:grab", { id: el.id });
     document.body.classList.add("dragging");
     resizeRef.current = {
       id: el.id, dir,
@@ -1164,6 +1203,16 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
                         touchAction: "none",
                       }}>
                         <PreviewElement el={el} scale={1} interactive={interactiveIframeId === el.id} />
+                        {(() => {
+                          const l = elementLocks[el.id];
+                          return l && l.until > Date.now() && l.by !== (userLogin ?? "") ? (
+                            <div className="absolute pointer-events-none select-none" style={{ left: 0, top: -24 / view.s, transform: `scale(${1 / view.s})`, transformOrigin: "0 0" }}>
+                              <span className="inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-semibold text-white" style={{ background: "rgb(var(--c-accent))", boxShadow: "0 1px 4px rgba(0,0,0,.4)" }}>
+                                ✋ {l.by}
+                              </span>
+                            </div>
+                          ) : null;
+                        })()}
                         {/* слой ручек: контр-зеркалится, чтобы при flipH/flipV ручки не переворачивались вместе с элементом */}
                         <div className="absolute inset-0 pointer-events-none" style={{ transform: `scale(${el.flipH ? -1 : 1}, ${el.flipV ? -1 : 1})` }}>
                         {selectedId === el.id && !el.locked && (["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const).map((dir) => {

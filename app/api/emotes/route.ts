@@ -61,23 +61,30 @@ async function twitchEmotes(broadcasterId: string | null, user: { token: string;
   if (!broadcasterId || !user) return out;
 
   const headers = { "Client-Id": process.env.TWITCH_CLIENT_ID!, Authorization: `Bearer ${user.token}` };
-  // 1) прямые канальные смайлики
+  const seen = new Set(out.map((e) => e.code));
+  // 1) прямые канальные смайлики (если у канала они есть; иначе Twitch отдаёт 404)
   const ch = await safe(() =>
     fetch(`https://api.twitch.tv/helix/chat/emotes/channel?broadcaster_id=${broadcasterId}`, { headers }).then((r) => r.json())
   );
   if (ch?.data?.length) {
-    for (const e of ch.data) if (img(e)) out.push({ platform: "twitch", code: e.name, url: img(e) });
-    return out;
+    for (const e of ch.data) {
+      if (img(e) && !seen.has(e.name)) {
+        out.push({ platform: "twitch", code: e.name, url: img(e) });
+        seen.add(e.name);
+      }
+    }
   }
-  // 2) фолбэк: смайлики, доступные аккаунту, отфильтрованные по владельцу канала
-  //    (эндпоинт требует user_id, совпадающий с токеном)
-  if (!user.isOwner) return out;
-  const own = await safe(() =>
-    fetch(`https://api.twitch.tv/helix/chat/emotes/user?user_id=${broadcasterId}`, { headers }).then((r) => r.json())
-  );
-  for (const e of own?.data ?? []) {
-    if (img(e) && (!e.owner_id || String(e.owner_id) === String(broadcasterId))) {
-      out.push({ platform: "twitch", code: e.name, url: img(e) });
+  // 2) все смайлики, доступные АККАУНТУ стримера (его подписки и свой канал) —
+  //    эндпоинт требует user_id, совпадающий с токеном, поэтому только токеном владельца
+  if (user.isOwner) {
+    const own = await safe(() =>
+      fetch(`https://api.twitch.tv/helix/chat/emotes/user?user_id=${broadcasterId}`, { headers }).then((r) => r.json())
+    );
+    for (const e of own?.data ?? []) {
+      if (img(e) && !seen.has(e.name)) {
+        out.push({ platform: "twitch", code: e.name, url: img(e) });
+        seen.add(e.name);
+      }
     }
   }
   return out;
