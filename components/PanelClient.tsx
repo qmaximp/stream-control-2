@@ -359,6 +359,17 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
     f?.contentWindow?.postMessage(JSON.stringify({ event: "command", func, args }), "*");
   }, []);
 
+  // плей/пауза с учётом буферизации: пока плеер буферизует (st=3), он ещё «не играет»,
+  // но пользователь уже включал — повторный клик означает паузу, а не ещё один play
+  const lastYtCmdRef = useRef<Map<string, "play" | "pause">>(new Map());
+  const ytToggle = useCallback((id: string) => {
+    const stNow = ytStatesRef.current.get(id)?.st;
+    const playing = stNow === 1 || (stNow === 3 && lastYtCmdRef.current.get(id) === "play");
+    ytCommand(id, playing ? "pauseVideo" : "playVideo");
+    lastYtCmdRef.current.set(id, playing ? "pause" : "play");
+    ytUiRefs.current.get(id)?.note();
+  }, [ytCommand]);
+
   const registerYtUi = useCallback((id: string, ctl: { note: () => void; enter: () => void; leave: () => void } | null) => {
     if (ctl) ytUiRefs.current.set(id, ctl);
     else ytUiRefs.current.delete(id);
@@ -787,8 +798,7 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
         } else {
           // клик по YouTube-видео — плей/пауза (интерактив iframe для YouTube не нужен,
           // iframe всегда прозрачен для курсора: так работают и drag, и hover-плашка)
-          ytCommand(dr.id, st?.st === 1 ? "pauseVideo" : "playVideo");
-          ytUiRefs.current.get(dr.id)?.note();
+          ytToggle(dr.id);
         }
       } else if (!dr.moved) {
         // клик по сайту без перетаскивания = активируем интерактив (управление внутри)
@@ -802,7 +812,7 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
       emit("element:move", lastMoveRef.current);
       lastMoveRef.current = null;
     }
-  }, [emit, ytCommand]);
+  }, [emit, ytToggle]);
 
   useEffect(() => {
     window.addEventListener("pointermove", handleMouseMove);
@@ -1325,7 +1335,8 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
                         onPointerMove={isYt ? () => ytUiRefs.current.get(el.id)?.note() : undefined}
                         onPointerLeave={isYt ? () => ytUiRefs.current.get(el.id)?.leave() : undefined}>
                         <PreviewElement el={el} scale={1} interactive={interactiveIframeId === el.id}
-                          ytSt={isYt ? ytStates.get(el.id) : undefined} ytRegister={registerYtUi} ytCmd={ytCommand} />
+                          ytSt={isYt ? ytStates.get(el.id) : undefined} ytRegister={registerYtUi} ytCmd={ytCommand}
+                          ytToggle={ytToggle} ytSelect={setSelectedId} />
                         {(() => {
                           const l = elementLocks[el.id];
                           return l && l.until > Date.now() && l.by !== (userLogin ?? "") ? (
@@ -1636,20 +1647,21 @@ function MoonIcon() {
   );
 }
 
-function PreviewElement({ el, scale, interactive, ytSt, ytRegister, ytCmd }: {
+function PreviewElement({ el, scale, interactive, ytSt, ytRegister, ytCmd, ytToggle, ytSelect }: {
   el: StreamElement; scale: number; interactive?: boolean;
   ytSt?: YtState; ytRegister?: (id: string, ctl: { note: () => void; enter: () => void; leave: () => void } | null) => void; ytCmd?: (id: string, func: string, args?: any[]) => void;
+  ytToggle?: (id: string) => void; ytSelect?: (id: string) => void;
 }) {
   if (el.type === "image" || el.type === "gif") return <img src={el.src} alt="" className="w-full h-full object-fill pointer-events-none" draggable={false} />;
   if (el.type === "iframe") {
     const embed = toEmbedUrl(el.src || "");
-    if (isYouTubeEmbed(embed) && ytRegister && ytCmd)
+    if (isYouTubeEmbed(embed) && ytRegister && ytCmd && ytToggle && ytSelect)
       return (
         <>
           <iframe src={withOrigin(withCleanPlayer(withMuted(withAutoplay(embed, el.autoplay))))} title="embed" data-id={el.id}
             className="w-full h-full" style={{ border: 0, pointerEvents: "none" }}
             allow="autoplay; encrypted-media; picture-in-picture" />
-          <YouTubeChrome el={el} st={ytSt} register={ytRegister} cmd={ytCmd} />
+          <YouTubeChrome el={el} st={ytSt} register={ytRegister} cmd={ytCmd} toggle={ytToggle} select={ytSelect} />
         </>
       );
     return (
@@ -1671,11 +1683,14 @@ function PreviewElement({ el, scale, interactive, ytSt, ytRegister, ytCmd }: {
 
 // своих хром поверх iframe YouTube: превью-заставка до старта и плашка управления
 // (плей/пауза, перемотка, звук). Плашка прячется через 3с после ухода мыши —
-// как у нативного плеера, но в том числе на паузе (нативный UI на паузе не прячется)
-function YouTubeChrome({ el, st, register, cmd }: {
+// как у нативного плеера, но в том числе на паузе (нативный UI на паузе не прячется).
+// ВАЖНО: любое взаимодействие с плашкой выбирает элемент — ретрансляция в оверлей
+// работает только для выбранного элемента, без этого play с плашки до оверлея не доходит
+function YouTubeChrome({ el, st, register, cmd, toggle, select }: {
   el: StreamElement; st?: YtState;
   register: (id: string, ctl: { note: () => void; enter: () => void; leave: () => void } | null) => void;
   cmd: (id: string, func: string, args?: any[]) => void;
+  toggle: (id: string) => void; select: (id: string) => void;
 }) {
   const [visible, setVisible] = useState(false);
   const hoverRef = useRef(false);
@@ -1750,11 +1765,11 @@ function YouTubeChrome({ el, st, register, cmd }: {
           pointerEvents: visible ? "auto" : "none",
           opacity: visible ? 1 : 0, transition: "opacity .25s",
         }}
-        onPointerDown={(e) => e.stopPropagation()}
+        onPointerDown={(e) => { e.stopPropagation(); select(el.id); }}
         onPointerEnter={enter}
       >
         <button
-          onClick={() => { cmd(el.id, stNum === 1 ? "pauseVideo" : "playVideo"); note(); }}
+          onClick={() => toggle(el.id)}
           title={stNum === 1 ? "Пауза" : "Играть"}
           style={{ width: 18 * u, height: 18 * u, display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}
           className="hover:opacity-80"
@@ -1768,7 +1783,7 @@ function YouTubeChrome({ el, st, register, cmd }: {
         <span style={{ fontFamily: "monospace", whiteSpace: "nowrap", flex: "0 0 auto", opacity: 0.9 }}>
           {fmtTime(scrubSafe(st?.t))} / {fmtTime(st?.dur || 0)}
         </span>
-        <SeekSlider st={st} u={u} onSeek={(v) => cmd(el.id, "seekTo", [v, true])} onNote={note} />
+        <SeekSlider st={st} u={u} onSeek={(v) => cmd(el.id, "seekTo", [v, true])} onNote={note} selectEl={() => select(el.id)} />
         <button
           onClick={() => { cmd(el.id, st?.muted ? "unMute" : "mute"); note(); }}
           title={st?.muted ? "Включить звук" : "Выключить звук"}
@@ -1783,7 +1798,7 @@ function YouTubeChrome({ el, st, register, cmd }: {
         </button>
         <input
           type="range" min={0} max={100} value={st?.muted ? 0 : (st?.vol ?? 100)}
-          onPointerDown={(e) => e.stopPropagation()}
+          onPointerDown={(e) => { e.stopPropagation(); select(el.id); }}
           onChange={(e) => { cmd(el.id, "setVolume", [parseInt(e.target.value, 10)]); if (st?.muted) cmd(el.id, "unMute"); note(); }}
           title="Громкость"
           style={{ width: 42 * u, height: 3 * u, accentColor: "rgb(var(--c-accent2))", cursor: "pointer", flex: "0 0 auto" }}
@@ -1794,7 +1809,7 @@ function YouTubeChrome({ el, st, register, cmd }: {
 }
 
 // полоса перемотки: пока тянут — двигаем локально, команды шлём с троттлингом
-function SeekSlider({ st, u, onSeek, onNote }: { st?: YtState; u: number; onSeek: (v: number) => void; onNote: () => void }) {
+function SeekSlider({ st, u, onSeek, onNote, selectEl }: { st?: YtState; u: number; onSeek: (v: number) => void; onNote: () => void; selectEl?: () => void }) {
   const [scrub, setScrub] = useState<number | null>(null);
   const lastSentRef = useRef(0);
   const dur = st?.dur || 0;
@@ -1803,7 +1818,7 @@ function SeekSlider({ st, u, onSeek, onNote }: { st?: YtState; u: number; onSeek
     <input
       type="range" min={0} max={dur || 1} step={0.1} value={Math.min(val, dur || 1)}
       disabled={!dur}
-      onPointerDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => { e.stopPropagation(); if (selectEl) selectEl(); }}
       onChange={(e) => {
         const v = parseFloat(e.target.value);
         setScrub(v);

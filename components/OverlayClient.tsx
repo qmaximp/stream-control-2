@@ -77,15 +77,16 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 		socket.on('elements:cleared', () => setState(p => ({ ...p, elements: [] })))
 		// команды плееру из панели (пуск/пауза/громкость) — через YouTube postMessage API
 		socket.on('element:command', ({ id, cmd, value }: { id: string; cmd: string; value?: number }) => {
-			markYtLive(id)
 			resumeRef.current.delete(id) // панель сама управляет этим элементом — не возобновлять по видимости вкладки
 			if (cmd === 'time') {
 				// целевая позиция из превью: подтягиваемся сразу при расхождении > 2с —
-				// даже на паузе, иначе перемотка в панели не доезжает до оверлея
+				// даже на паузе, иначе перемотка в панели не доезжает до оверлея.
+				// Незапущенный плеер (st -1/0) не трогаем: seek до старта его клинит
 				seekTargets.set(id, value ?? 0)
 				const f = iframeRefs.get(id)
 				const cur = playerTimes.get(id)
-				if (f?.contentWindow && cur && Math.abs(cur.t - (value ?? 0)) > 2) {
+				const started = !!cur && (cur.st === 1 || cur.st === 2 || cur.st === 3)
+				if (f?.contentWindow && started && cur && Math.abs(cur.t - (value ?? 0)) > 2) {
 					f.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [value ?? 0, true] }), '*')
 					playerTimes.set(id, { t: value ?? 0, st: cur.st })
 				}
