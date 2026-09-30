@@ -334,10 +334,6 @@ app.prepare().then(() => {
 			}
 		})
 
-		socket.on('element:command', data => {
-			socket.broadcast.to(room).emit('element:command', data)
-		})
-
 		socket.on('elements:clear', () => {
 			state.elements = []
 			io.to(room).emit('elements:cleared')

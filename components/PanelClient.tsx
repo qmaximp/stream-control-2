@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io as ioInit, Socket } from "socket.io-client";
 import type { SyncState, StreamElement } from "@/lib/types";
-import { toEmbedUrl, withAutoplay, withMuted, withOrigin, withCleanPlayer, isYouTubeSrc, isYouTubeEmbed, youtubeId } from "@/lib/embed";
+import { toEmbedUrl, isYouTubeLink } from "@/lib/embed";
 import { noteServerClock, serverClockLag } from "@/lib/clock";
 import { playFinishSound } from "@/lib/sound";
 import ObsPanel from "@/components/ObsPanel";
@@ -13,9 +13,6 @@ const CANVAS_W = 1920;
 const CANVAS_H = 1080;
 
 type Emote = { platform: string; code: string; url: string };
-
-// состояние YouTube-плеера одного элемента (из infoDelivery)
-type YtState = { vid: string; st: number; t: number; dur: number; muted: boolean; vol: number };
 
 export default function PanelClient({ channel, room, userLogin }: { channel?: string | null; room?: string | null; userLogin?: string | null }) {
   const [state, setState] = useState<SyncState>({ elements: [], canvasW: CANVAS_W, canvasH: CANVAS_H });
@@ -36,16 +33,7 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   const [emotePlatform, setEmotePlatform] = useState<"all" | "twitch" | "7tv" | "bttv" | "ffz">("all");
   const [emoteNotes, setEmoteNotes] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selectedIdRef = useRef<string | null>(null);
-  selectedIdRef.current = selectedId;
   const [interactiveIframeId, setInteractiveIframeId] = useState<string | null>(null);
-  const interactiveIframeRef = useRef<string | null>(null);
-  interactiveIframeRef.current = interactiveIframeId;
-  // состояние YouTube-плееров (для своих плашек управления на канвасе)
-  const [ytStates, setYtStates] = useState<Map<string, YtState>>(new Map());
-  const ytStatesRef = useRef<Map<string, YtState>>(ytStates);
-  // плашки регистрируют сюда методы «показать/продлить» — их дёргают события элемента
-  const ytUiRefs = useRef<Map<string, { note: () => void; enter: () => void; leave: () => void }>>(new Map());
   const [addSheet, setAddSheet] = useState<null | "image" | "video">(null);
   const [addSheetClosing, setAddSheetClosing] = useState(false);
   const addSheetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -281,139 +269,6 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
       emit("element:update", { id, ...merged });
     }, 120);
     pendingUpdatesRef.current.set(id, { partial: merged, timer });
-  }, [emit]);
-
-  // ретрансляция состояния плеера из превью: что происходит в превью — повторяется в оверлее.
-  // Ретранслируем ТОЛЬКО выбранный элемент: иначе две открытые панели ретранслируют друг
-  // друга и плеер на оверлее «дёргается» (плей/пауза/перемотки с двух сторон)
-  const previewStateRef = useRef<Map<string, number>>(new Map());
-  const lastTimeRelayRef = useRef(0);
-
-  useEffect(() => {
-    const onMsg = (e: MessageEvent) => {
-      // какому элементу принадлежит окно-источник
-      let elId: string | null = null;
-      const nodes = document.querySelectorAll("iframe[data-id]");
-      for (const n of nodes) {
-        if ((n as HTMLIFrameElement).contentWindow === e.source) { elId = n.getAttribute("data-id"); break; }
-      }
-      if (!elId) return;
-      try {
-        const d = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
-        if (!d || d.event !== "infoDelivery" || !d.info) return;
-        const info = d.info;
-        const st: number | undefined = info.playerState;
-        // состояние для плашки управления (обновляем только видимые значения)
-        setYtStates((prev) => {
-          const cur = prev.get(elId!);
-          const vid = youtubeId(stateRef.current.elements.find((x) => x.id === elId)?.src || "");
-          const next: YtState = {
-            vid,
-            st: st ?? cur?.st ?? -1,
-            t: info.currentTime ?? cur?.t ?? 0,
-            dur: info.duration ?? cur?.dur ?? 0,
-            muted: info.muted ?? cur?.muted ?? true,
-            vol: Math.round(info.volume ?? cur?.vol ?? 100),
-          };
-          if (cur && cur.vid === next.vid && cur.st === next.st && Math.abs(cur.t - next.t) < 0.25 &&
-            cur.dur === next.dur && cur.muted === next.muted && cur.vol === next.vol) return prev;
-          const m = new Map(prev);
-          m.set(elId!, next);
-          ytStatesRef.current = m;
-          return m;
-        });
-        // дальше ретранслируем только выбранный элемент — он «пульт» оверлея
-        if (elId !== selectedIdRef.current) return;
-        if (st !== undefined) {
-          const prev = previewStateRef.current.get(elId);
-          if (st !== prev) {
-            previewStateRef.current.set(elId, st);
-            // 1 = играет, 2 = пауза, 0 = закончилось; 3 (буферизация) не шлём
-            if (st === 1) {
-              emit("element:command", { id: elId, cmd: "playVideo" });
-              if (info.currentTime !== undefined) emit("element:command", { id: elId, cmd: "time", value: info.currentTime });
-            } else if (st === 2 || st === 0) emit("element:command", { id: elId, cmd: "pauseVideo" });
-          }
-        }
-        // позиция воспроизведения — не чаще раза в секунду (оверлей подтянется при дрейфе > 2с)
-        if (info.currentTime !== undefined) {
-          const now = performance.now();
-          if (now - lastTimeRelayRef.current >= 1000) {
-            lastTimeRelayRef.current = now;
-            emit("element:command", { id: elId, cmd: "time", value: info.currentTime });
-          }
-        }
-        if (info.volume !== undefined) {
-          const v = Math.max(0, Math.min(100, Math.round(info.volume)));
-          emit("element:command", { id: elId, cmd: "setVolume", value: v });
-        }
-        if (info.muted !== undefined) {
-          emit("element:command", { id: elId, cmd: info.muted ? "mute" : "unMute" });
-        }
-      } catch {}
-    };
-    window.addEventListener("message", onMsg);
-    return () => window.removeEventListener("message", onMsg);
-  }, [emit]);
-
-  // команда в плеер конкретного элемента (плашка управления на канвасе)
-  const ytCommand = useCallback((id: string, func: string, args: any[] = []) => {
-    const f = document.querySelector(`iframe[data-id="${id}"]`) as HTMLIFrameElement | null;
-    f?.contentWindow?.postMessage(JSON.stringify({ event: "command", func, args }), "*");
-  }, []);
-
-  // плей/пауза с учётом буферизации: пока плеер буферизует (st=3), он ещё «не играет»,
-  // но пользователь уже включал — повторный клик означает паузу, а не ещё один play
-  const lastYtCmdRef = useRef<Map<string, "play" | "pause">>(new Map());
-  const ytToggle = useCallback((id: string) => {
-    const stNow = ytStatesRef.current.get(id)?.st;
-    const playing = stNow === 1 || (stNow === 3 && lastYtCmdRef.current.get(id) === "play");
-    ytCommand(id, playing ? "pauseVideo" : "playVideo");
-    lastYtCmdRef.current.set(id, playing ? "pause" : "play");
-    ytUiRefs.current.get(id)?.note();
-  }, [ytCommand]);
-
-  const registerYtUi = useCallback((id: string, ctl: { note: () => void; enter: () => void; leave: () => void } | null) => {
-    if (ctl) ytUiRefs.current.set(id, ctl);
-    else ytUiRefs.current.delete(id);
-  }, []);
-
-  // браузер ставит YouTube-плееры на паузу в скрытой вкладке — при возврате
-  // возобновляем всё, что играло до сворачивания (иначе видео «остаётся» на паузе)
-  const wasPlayingRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const onVis = () => {
-      if (document.hidden) {
-        wasPlayingRef.current.clear();
-        for (const [id, s] of ytStatesRef.current.entries()) if (s.st === 1) wasPlayingRef.current.add(id);
-      } else {
-        for (const id of wasPlayingRef.current) ytCommand(id, "playVideo");
-        wasPlayingRef.current.clear();
-      }
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
-  }, [ytCommand]);
-
-  // handshake: подписываемся на отчёты плееров превью (повторяем — если плеер загрузился позже).
-  // ВАЖНО: всем embed-iframe, а не только первому — иначе перемотка/плей работают лишь у одного видео
-  useEffect(() => {
-    const t = setInterval(() => {
-      document.querySelectorAll('iframe[title="embed"]').forEach((f) => {
-        (f as HTMLIFrameElement).contentWindow?.postMessage(JSON.stringify({ event: "listening", id: 1, channel: "widget" }), "*");
-      });
-      // выбранный играющий элемент раз в 5с подтверждаем оверлею: закрывает случай
-      // перезагрузившегося оверлея (рефреш OBS / переподключение) без действий пользователя
-      const sel = selectedIdRef.current;
-      if (sel) {
-        const st = ytStatesRef.current.get(sel);
-        if (st?.st === 1) {
-          emit("element:command", { id: sel, cmd: "playVideo" });
-          emit("element:command", { id: sel, cmd: "time", value: st.t });
-        }
-      }
-    }, 5000);
-    return () => clearInterval(t);
   }, [emit]);
 
   // интерактив iframe действует только пока выбран именно он
@@ -750,8 +605,7 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
       // текстом — ссылка: YouTube → видео-элемент, картинка по расширению → картинка
       const text = (cd.getData("text/plain") || "").trim();
       if (!/^https?:\/\//i.test(text)) return;
-      const embed = toEmbedUrl(text);
-      if (isYouTubeEmbed(embed)) {
+      if (isYouTubeLink(text)) {
         e.preventDefault();
         const p = parkingSpot(560, 315);
         addElement({ type: "iframe", src: text, ...p, width: 560, height: 315, text: "" });
@@ -832,27 +686,9 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   );
 
   const handleMouseUp = useCallback(() => {
-    const dr = dragRef.current;
-    if (dr?.type === "iframe") {
-      const el = stateRef.current.elements.find((x) => x.id === dr.id);
-      if (el && isYouTubeSrc(el.src || "")) {
-        const st = ytStatesRef.current.get(dr.id);
-        if (dr.moved) {
-          // после перетаскивания подтягиваем оверлей к панели (синхронизация позиции/состояния:
-          // закрывает и случай, когда оверлей перезагрузился и стоит на заставке)
-          if (st?.st === 1) {
-            emit("element:command", { id: dr.id, cmd: "playVideo" });
-            emit("element:command", { id: dr.id, cmd: "time", value: st.t });
-          }
-        } else {
-          // клик по YouTube-видео — плей/пауза (интерактив iframe для YouTube не нужен,
-          // iframe всегда прозрачен для курсора: так работают и drag, и hover-плашка)
-          ytToggle(dr.id);
-        }
-      } else if (!dr.moved) {
-        // клик по сайту без перетаскивания = активируем интерактив (управление внутри)
-        setInteractiveIframeId(dr.id);
-      }
+    if (dragRef.current?.type === "iframe") {
+      // клик по iframe без перетаскивания = активируем интерактив (управление сайтом внутри)
+      setInteractiveIframeId(dragRef.current.moved ? null : dragRef.current.id);
     }
     dragRef.current = null;
     document.body.classList.remove("dragging");
@@ -861,7 +697,7 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
       emit("element:move", lastMoveRef.current);
       lastMoveRef.current = null;
     }
-  }, [emit, ytToggle]);
+  }, [emit]);
 
   useEffect(() => {
     window.addEventListener("pointermove", handleMouseMove);
@@ -1368,7 +1204,6 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
                   style={{ left: state.canvasW + 175, top: 0, height: state.canvasH, writingMode: "vertical-rl", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28 }}>зона предзагрузки элементов</span>
                 {state.elements.map((el) => {
                   const hs = 10 / view.s;
-                  const isYt = el.type === "iframe" && isYouTubeSrc(el.src || "");
                   return (
                       <div key={el.id} onPointerDown={(e) => handleDragStart(e, el)}
                         data-elwrap="1"
@@ -1379,13 +1214,8 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
                         outline: selectedId === el.id ? `${2 / view.s}px solid rgb(var(--c-accent2))` : undefined,
                         transform: `${el.rotation ? `rotate(${el.rotation}deg)` : ""}${el.flipH || el.flipV ? ` scale(${el.flipH ? -1 : 1}, ${el.flipV ? -1 : 1})` : ""}` || undefined,
                         touchAction: "none",
-                      }}
-                        onPointerEnter={isYt ? () => ytUiRefs.current.get(el.id)?.enter() : undefined}
-                        onPointerMove={isYt ? () => ytUiRefs.current.get(el.id)?.note() : undefined}
-                        onPointerLeave={isYt ? () => ytUiRefs.current.get(el.id)?.leave() : undefined}>
-                        <PreviewElement el={el} scale={1} interactive={interactiveIframeId === el.id}
-                          ytSt={isYt ? ytStates.get(el.id) : undefined} ytRegister={registerYtUi} ytCmd={ytCommand}
-                          ytToggle={ytToggle} ytSelect={setSelectedId} />
+                      }}>
+                        <PreviewElement el={el} scale={1} interactive={interactiveIframeId === el.id} />
                         {(() => {
                           const l = elementLocks[el.id];
                           return l && l.until > Date.now() && l.by !== (userLogin ?? "") ? (
@@ -1696,29 +1526,14 @@ function MoonIcon() {
   );
 }
 
-function PreviewElement({ el, scale, interactive, ytSt, ytRegister, ytCmd, ytToggle, ytSelect }: {
-  el: StreamElement; scale: number; interactive?: boolean;
-  ytSt?: YtState; ytRegister?: (id: string, ctl: { note: () => void; enter: () => void; leave: () => void } | null) => void; ytCmd?: (id: string, func: string, args?: any[]) => void;
-  ytToggle?: (id: string) => void; ytSelect?: (id: string) => void;
-}) {
+function PreviewElement({ el, scale, interactive }: { el: StreamElement; scale: number; interactive?: boolean }) {
   if (el.type === "image" || el.type === "gif") return <img src={el.src} alt="" className="w-full h-full object-fill pointer-events-none" draggable={false} />;
-  if (el.type === "iframe") {
-    const embed = toEmbedUrl(el.src || "");
-    if (isYouTubeEmbed(embed) && ytRegister && ytCmd && ytToggle && ytSelect)
-      return (
-        <>
-          <iframe src={withOrigin(withCleanPlayer(withMuted(withAutoplay(embed, el.autoplay))))} title="embed" data-id={el.id}
-            className="w-full h-full" style={{ border: 0, pointerEvents: "none" }}
-            allow="autoplay; encrypted-media; picture-in-picture" />
-          <YouTubeChrome el={el} st={ytSt} register={ytRegister} cmd={ytCmd} toggle={ytToggle} select={ytSelect} />
-        </>
-      );
+  if (el.type === "iframe")
     return (
-      <iframe src={embed} title="embed" data-id={el.id}
+      <iframe src={toEmbedUrl(el.src || "")} title="embed" data-id={el.id}
         className="w-full h-full" style={{ border: 0, pointerEvents: interactive ? "auto" : "none" }}
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen />
     );
-  }
   if (el.type === "video") return <video src={el.src} className="w-full h-full object-fill pointer-events-none" muted loop autoPlay playsInline />;
   if (el.type === "text") return (
     <div className="w-full h-full flex items-center justify-center pointer-events-none overflow-hidden"
@@ -1728,177 +1543,6 @@ function PreviewElement({ el, scale, interactive, ytSt, ytRegister, ytCmd, ytTog
   );
   if (el.type === "timer") return <TimerPreview el={el} scale={1} />;
   return null;
-}
-
-// своих хром поверх iframe YouTube: превью-заставка до старта и плашка управления
-// (плей/пауза, перемотка, звук). Плашка прячется через 3с после ухода мыши —
-// как у нативного плеера, но в том числе на паузе (нативный UI на паузе не прячется).
-// ВАЖНО: любое взаимодействие с плашкой выбирает элемент — ретрансляция в оверлей
-// работает только для выбранного элемента, без этого play с плашки до оверлея не доходит
-function YouTubeChrome({ el, st, register, cmd, toggle, select }: {
-  el: StreamElement; st?: YtState;
-  register: (id: string, ctl: { note: () => void; enter: () => void; leave: () => void } | null) => void;
-  cmd: (id: string, func: string, args?: any[]) => void;
-  toggle: (id: string) => void; select: (id: string) => void;
-}) {
-  const [visible, setVisible] = useState(false);
-  const hoverRef = useRef(false);
-  const untilRef = useRef(0);
-  const everPlayedRef = useRef(false);
-
-  const sync = useCallback(() => {
-    setVisible(hoverRef.current || performance.now() < untilRef.current);
-  }, []);
-  const note = useCallback(() => {
-    untilRef.current = performance.now() + 3000;
-    sync();
-  }, [sync]);
-  const enter = useCallback(() => { hoverRef.current = true; note(); }, [note]);
-  const leave = useCallback(() => { hoverRef.current = false; sync(); }, [sync]);
-
-  useEffect(() => {
-    register(el.id, { note, enter, leave });
-    return () => register(el.id, null);
-  }, [el.id, register, note, enter, leave]);
-
-  // перерисовка видимости по таймеру (плашка исчезает сама после 3с без активности)
-  useEffect(() => {
-    const i = setInterval(sync, 400);
-    return () => clearInterval(i);
-  }, [sync]);
-
-  // любое изменение состояния плеера (клик по видео, пауза) — показать плашку заново
-  const stNum = st?.st;
-  useEffect(() => {
-    if (stNum === 1) everPlayedRef.current = true;
-    if (stNum !== undefined) note();
-  }, [stNum, note]);
-
-  const vid = youtubeId(el.src || "");
-  const known = !!st && st.vid === vid;
-  // превью-заставка: плеер не запускался (или поставили на паузу в самом начале)
-  const poster = known
-    ? (st!.st === -1 || st!.st === 5 || (st!.st === 2 && st!.t < 1 && !everPlayedRef.current))
-    : !el.autoplay;
-
-  const u = Math.max(0.8, Math.min(2.2, el.height / 315)); // масштаб плашки от высоты элемента
-
-  return (
-    <>
-      {poster && vid && (
-        <div className="absolute inset-0 overflow-hidden pointer-events-none" style={{ background: "#000" }}>
-          <img
-            src={`https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`}
-            onError={(e) => {
-              const img = e.currentTarget;
-              if (!img.dataset.fallback) { img.dataset.fallback = "1"; img.src = `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`; }
-            }}
-            alt="" draggable={false}
-            style={{ width: "100%", height: "100%", objectFit: "cover" }}
-          />
-          <div className="absolute inset-0 flex items-center justify-center">
-            <svg width={68 * u} height={48 * u} viewBox="0 0 68 48" style={{ filter: "drop-shadow(0 2px 6px rgba(0,0,0,.45))" }}>
-              <path d="M66.5 7.7c-.8-2.9-3-5.1-5.9-5.9C55.5.5 34 .5 34 .5S12.5.5 7.4 1.8c-2.9.8-5.1 3-5.9 5.9C.2 12.8.2 24 .2 24s0 11.2 1.3 16.3c.8 2.9 3 5.1 5.9 5.9C12.5 47.5 34 47.5 34 47.5s21.5 0 26.6-1.3c2.9-.8 5.1-3 5.9-5.9C67.8 35.2 67.8 24 67.8 24s0-11.2-1.3-16.3z" fill="#f00" />
-              <path d="M45 24 27 14v20z" fill="#fff" />
-            </svg>
-          </div>
-        </div>
-      )}
-      <div
-        style={{
-          position: "absolute", left: 6 * u, right: 6 * u, bottom: 6 * u,
-          display: "flex", alignItems: "center", gap: 6 * u,
-          padding: `${5 * u}px ${8 * u}px`, borderRadius: 8 * u,
-          background: "rgba(0,0,0,.62)", color: "#fff",
-          fontSize: 11 * u, lineHeight: 1,
-          pointerEvents: visible ? "auto" : "none",
-          opacity: visible ? 1 : 0, transition: "opacity .25s",
-        }}
-        onPointerDown={(e) => { e.stopPropagation(); select(el.id); }}
-        onPointerEnter={enter}
-      >
-        <button
-          onClick={() => toggle(el.id)}
-          title={stNum === 1 ? "Пауза" : "Играть"}
-          style={{ width: 18 * u, height: 18 * u, display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}
-          className="hover:opacity-80"
-        >
-          {stNum === 1 ? (
-            <svg width={12 * u} height={12 * u} viewBox="0 0 24 24" fill="#fff"><rect x="5" y="4" width="5" height="16" rx="1" /><rect x="14" y="4" width="5" height="16" rx="1" /></svg>
-          ) : (
-            <svg width={12 * u} height={12 * u} viewBox="0 0 24 24" fill="#fff"><path d="M7 4.5v15l13-7.5z" /></svg>
-          )}
-        </button>
-        <span style={{ fontFamily: "monospace", whiteSpace: "nowrap", flex: "0 0 auto", opacity: 0.9 }}>
-          {fmtTime(scrubSafe(st?.t))} / {fmtTime(st?.dur || 0)}
-        </span>
-        <SeekSlider st={st} u={u} onSeek={(v) => cmd(el.id, "seekTo", [v, true])} onNote={note} selectEl={() => select(el.id)} />
-        <button
-          onClick={() => { cmd(el.id, st?.muted ? "unMute" : "mute"); note(); }}
-          title={st?.muted ? "Включить звук" : "Выключить звук"}
-          style={{ width: 16 * u, height: 16 * u, display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto" }}
-          className="hover:opacity-80"
-        >
-          {st?.muted ? (
-            <svg width={13 * u} height={13 * u} viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round"><path d="M11 5 6 9H2v6h4l5 4z" fill="#fff" stroke="none" /><line x1="22" y1="9" x2="16" y2="15" /><line x1="16" y1="9" x2="22" y2="15" /></svg>
-          ) : (
-            <svg width={13 * u} height={13 * u} viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round"><path d="M11 5 6 9H2v6h4l5 4z" fill="#fff" stroke="none" /><path d="M15.5 8.5a5 5 0 0 1 0 7" /><path d="M18.5 5.5a9.5 9.5 0 0 1 0 13" /></svg>
-          )}
-        </button>
-        <input
-          type="range" min={0} max={100} value={st?.muted ? 0 : (st?.vol ?? 100)}
-          onPointerDown={(e) => { e.stopPropagation(); select(el.id); }}
-          onChange={(e) => { cmd(el.id, "setVolume", [parseInt(e.target.value, 10)]); if (st?.muted) cmd(el.id, "unMute"); note(); }}
-          title="Громкость"
-          style={{ width: 42 * u, height: 3 * u, accentColor: "rgb(var(--c-accent2))", cursor: "pointer", flex: "0 0 auto" }}
-        />
-      </div>
-    </>
-  );
-}
-
-// полоса перемотки: пока тянут — двигаем локально, команды шлём с троттлингом
-function SeekSlider({ st, u, onSeek, onNote, selectEl }: { st?: YtState; u: number; onSeek: (v: number) => void; onNote: () => void; selectEl?: () => void }) {
-  const [scrub, setScrub] = useState<number | null>(null);
-  const lastSentRef = useRef(0);
-  const dur = st?.dur || 0;
-  const val = scrub ?? st?.t ?? 0;
-  return (
-    <input
-      type="range" min={0} max={dur || 1} step={0.1} value={Math.min(val, dur || 1)}
-      disabled={!dur}
-      onPointerDown={(e) => { e.stopPropagation(); if (selectEl) selectEl(); }}
-      onChange={(e) => {
-        const v = parseFloat(e.target.value);
-        setScrub(v);
-        const now = performance.now();
-        if (now - lastSentRef.current >= 250) { lastSentRef.current = now; onSeek(v); }
-      }}
-      onPointerUp={(e) => {
-        const v = parseFloat((e.target as HTMLInputElement).value);
-        onSeek(v);
-        setScrub(null);
-        onNote();
-      }}
-      title="Перемотка"
-      style={{ flex: "1 1 auto", minWidth: 20 * u, height: 3 * u, accentColor: "rgb(var(--c-accent2))", cursor: "pointer" }}
-    />
-  );
-}
-
-function scrubSafe(t?: number): number {
-  return t && isFinite(t) ? t : 0;
-}
-
-function fmtTime(seconds: number): string {
-  if (!isFinite(seconds) || seconds < 0) seconds = 0;
-  const s = Math.floor(seconds);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  const mm = String(m).padStart(2, "0");
-  const ss = String(sec).padStart(2, "0");
-  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
 function TimerPreview({ el, scale }: { el: StreamElement; scale: number }) {

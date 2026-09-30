@@ -2,15 +2,10 @@
 
 import type { StreamElement, SyncState } from '@/lib/types'
 import { useEffect, useRef, useState } from 'react'
-import { toEmbedUrl, withAutoplay, withMuted, withOrigin, withCleanPlayer, youtubeId } from '@/lib/embed'
+import { toEmbedUrl } from '@/lib/embed'
 import { playFinishSound } from '@/lib/sound'
 import { noteServerClock, serverClockLag } from '@/lib/clock'
 import { io as ioInit } from 'socket.io-client'
-
-// iframe-плееры по id элемента: сюда приходят команды из панели
-const iframeRefs = new Map<string, HTMLIFrameElement>()
-const playerTimes = new Map<string, { t: number; st: number }>()
-const seekTargets = new Map<string, number>()
 
 export default function OverlayClient({ room }: { room?: string | null }) {
 	const [state, setState] = useState<SyncState>({
@@ -20,19 +15,6 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 	})
 	const [, force] = useState(0)
 	const [scale, setScale] = useState(1)
-	// YouTube-элементы, которые уже «живые» в этой сессии оверлея: пришла команда из панели
-	// или плеер начал воспроизведение. Пока элемент не живой — поверх iframe чистая заставка
-	// (нативный постер YouTube с кнопками в стриме показывать нельзя)
-	const [ytLive, setYtLive] = useState<Set<string>>(new Set())
-	const markYtLive = (id: string) =>
-		setYtLive(prev => {
-			if (prev.has(id)) return prev
-			const s = new Set(prev)
-			s.add(id)
-			return s
-		})
-	// элементы, игравшие на момент сворачивания вкладки, — возобновляются при возврате
-	const resumeRef = useRef<Set<string>>(new Set())
 
 	useEffect(() => {
 		const socket = ioInit({ transports: ['websocket', 'polling'], query: { room: room || 'default' } })
@@ -75,62 +57,12 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 			}),
 		)
 		socket.on('elements:cleared', () => setState(p => ({ ...p, elements: [] })))
-		// команды плееру из панели (пуск/пауза/громкость) — через YouTube postMessage API
-		socket.on('element:command', ({ id, cmd, value }: { id: string; cmd: string; value?: number }) => {
-			resumeRef.current.delete(id) // панель сама управляет этим элементом — не возобновлять по видимости вкладки
-			if (cmd === 'time') {
-				// целевая позиция из превью: подтягиваемся сразу при расхождении > 2с —
-				// даже на паузе, иначе перемотка в панели не доезжает до оверлея.
-				// Незапущенный плеер (st -1/0) не трогаем: seek до старта его клинит
-				seekTargets.set(id, value ?? 0)
-				const f = iframeRefs.get(id)
-				const cur = playerTimes.get(id)
-				const started = !!cur && (cur.st === 1 || cur.st === 2 || cur.st === 3)
-				if (f?.contentWindow && started && cur && Math.abs(cur.t - (value ?? 0)) > 2) {
-					f.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [value ?? 0, true] }), '*')
-					playerTimes.set(id, { t: value ?? 0, st: cur.st })
-				}
-				return
-			}
-			const f = iframeRefs.get(id)
-			if (f?.contentWindow) {
-				f.contentWindow.postMessage(JSON.stringify({ event: 'command', func: cmd, args: value !== undefined ? [value] : [] }), '*')
-			}
-		})
 		socket.on('canvas:resize', (dims: { w: number; h: number }) =>
 			setState(p => ({ ...p, canvasW: dims.w, canvasH: dims.h })),
 		)
 		return () => {
 			socket.disconnect()
 		}
-	}, [])
-
-	// отчёты своих плееров: позиция/состояние; при дрейфе от превью > 2с — перемотка
-	useEffect(() => {
-		const onMsg = (e: MessageEvent) => {
-			let id: string | null = null
-			for (const [key, f] of iframeRefs) if (f.contentWindow === e.source) { id = key; break }
-			if (!id) return
-			try {
-				const d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data
-				if (!d || d.event !== 'infoDelivery' || !d.info) return
-				const t = d.info.currentTime ?? playerTimes.get(id)?.t
-				const st = d.info.playerState ?? playerTimes.get(id)?.st ?? 0
-				if (t !== undefined) playerTimes.set(id, { t, st })
-				if (st === 1 || t > 0.5) markYtLive(id)
-				const target = seekTargets.get(id)
-				if (t !== undefined && target !== undefined && st === 1 && Math.abs(t - target) > 2) {
-					iframeRefs.get(id)?.contentWindow?.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [target, true] }), '*')
-				}
-			} catch {}
-		}
-		window.addEventListener('message', onMsg)
-		const hs = setInterval(() => {
-			for (const f of iframeRefs.values()) {
-				f.contentWindow?.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), '*')
-			}
-		}, 5000)
-		return () => { window.removeEventListener('message', onMsg); clearInterval(hs) }
 	}, [])
 
 	// перерисовка нужна только пока идёт хотя бы один таймер
@@ -151,25 +83,6 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 		window.addEventListener('resize', update)
 		return () => window.removeEventListener('resize', update)
 	}, [state.canvasW, state.canvasH])
-
-	// браузер ставит плееры на паузу в скрытой вкладке — при возврате возобновляем игравшее
-	useEffect(() => {
-		const onVis = () => {
-			if (document.hidden) {
-				resumeRef.current = new Set()
-				for (const [id, p] of playerTimes) if (p.st === 1) resumeRef.current.add(id)
-			} else {
-				for (const id of resumeRef.current)
-					iframeRefs.get(id)?.contentWindow?.postMessage(
-						JSON.stringify({ event: 'command', func: 'playVideo', args: [] }),
-						'*',
-					)
-				resumeRef.current.clear()
-			}
-		}
-		document.addEventListener('visibilitychange', onVis)
-		return () => document.removeEventListener('visibilitychange', onVis)
-	}, [])
 
 	const sorted = [...state.elements].sort(
 		(a, b) => (a.zIndex || 0) - (b.zIndex || 0),
@@ -196,19 +109,17 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 					overflow: 'hidden',
 				}}
 			>
-				{sorted.map(el => {
-					const vid = el.type === 'iframe' ? youtubeId(el.src || '') : ''
-					const cover = !!vid && !el.autoplay && !ytLive.has(el.id)
-					return el.visible || el.alwaysLoaded ? (
-						<OverlayElement key={el.id} el={el} cover={cover} vid={vid} />
-					) : null
-				})}
+				{sorted.map(el =>
+					el.visible || el.alwaysLoaded ? (
+						<OverlayElement key={el.id} el={el} />
+					) : null,
+				)}
 			</div>
 		</div>
 	)
 }
 
-function OverlayElement({ el, cover, vid }: { el: StreamElement; cover?: boolean; vid?: string }) {
+function OverlayElement({ el }: { el: StreamElement }) {
 	const [, force] = useState(0)
 	const playedRef = useRef(false)
 
@@ -259,35 +170,12 @@ function OverlayElement({ el, cover, vid }: { el: StreamElement; cover?: boolean
 		return (
 			<div style={style}>
 				<iframe
-					src={withOrigin(withCleanPlayer(withMuted(withAutoplay(toEmbedUrl(el.src || ''), el.autoplay))))}
+					src={toEmbedUrl(el.src || '')}
 					title='embed'
-					ref={(f) => {
-						if (f) iframeRefs.set(el.id, f)
-						else iframeRefs.delete(el.id)
-					}}
 					style={{ width: '100%', height: '100%', border: 'none' }}
-					allow='autoplay; encrypted-media; picture-in-picture'
+					allow='autoplay; encrypted-media; picture-in-picture; fullscreen'
 					allowFullScreen
 				/>
-				{cover && vid && (
-					<div
-						style={{ position: 'absolute', inset: 0, background: '#000', overflow: 'hidden' }}
-					>
-						<img
-							src={`https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`}
-							onError={(e) => {
-								const img = e.currentTarget
-								if (!img.dataset.fallback) {
-									img.dataset.fallback = '1'
-									img.src = `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`
-								}
-							}}
-							alt=''
-							draggable={false}
-							style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-						/>
-					</div>
-				)}
 			</div>
 		)
 	if (el.type === 'text')
