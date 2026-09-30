@@ -66,12 +66,15 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   type RemoteCursor = { id: string; login: string; x: number; y: number; hidden: boolean; t: number };
   const [remoteCursors, setRemoteCursors] = useState<RemoteCursor[]>([]);
   const cursorLastSent = useRef(0);
-  // локи объектов: пока один тащит, другой перехватить не может; +5 секунд после остановки
+  // локи объектов: пока один тащит, другой перехватить не может; +5 секунд после остановки.
+  // Стример (владелец комнаты) — исключение: двигает элементы всегда, сервер отдаёт ему лок
   const [elementLocks, setElementLocks] = useState<Record<string, { by: string; until: number }>>({});
+  const isStreamer = !!channel && !!userLogin && userLogin.toLowerCase() === channel.toLowerCase();
   const isLockedByOther = useCallback((id: string) => {
+    if (isStreamer) return false;
     const l = elementLocks[id];
     return !!l && l.until > Date.now() && l.by !== (userLogin ?? "");
-  }, [elementLocks, userLogin]);
+  }, [elementLocks, userLogin, isStreamer]);
   const [isCoarse, setIsCoarse] = useState(false);
   useEffect(() => {
     setIsCoarse(window.matchMedia?.("(pointer: coarse)").matches || navigator.maxTouchPoints > 0);
@@ -723,6 +726,52 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
     // играет в панели и на оверлее только после нажатия play
     if (url) addElement({ type: "iframe", src: url, ...p, width: 560, height: 315, text: "" });
   }, [addElement]);
+
+  // вставка медиа из буфера (Ctrl+V): скриншоты, файлы из проводника, ссылки на картинки и YouTube
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      // не мешаем вставке текста в поля ввода
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const cd = e.clipboardData;
+      if (!cd) return;
+      const files: File[] = [];
+      for (const it of Array.from(cd.items)) {
+        if (it.kind === "file") {
+          const f = it.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length) {
+        e.preventDefault();
+        void handleDropFiles(files);
+        return;
+      }
+      // текстом — ссылка: YouTube → видео-элемент, картинка по расширению → картинка
+      const text = (cd.getData("text/plain") || "").trim();
+      if (!/^https?:\/\//i.test(text)) return;
+      const embed = toEmbedUrl(text);
+      if (isYouTubeEmbed(embed)) {
+        e.preventDefault();
+        const p = parkingSpot(560, 315);
+        addElement({ type: "iframe", src: text, ...p, width: 560, height: 315, text: "" });
+        return;
+      }
+      if (/\.(png|jpe?g|gif|webp|avif|bmp|svg)(\?|#|$)/i.test(text)) {
+        e.preventDefault();
+        void (async () => {
+          try {
+            const size = await getImageSize(text);
+            const k = Math.min(1, 1280 / Math.max(size.w, size.h));
+            const p = parkingSpot();
+            addElement({ type: "image", src: text, ...p, width: Math.round(size.w * k), height: Math.round(size.h * k), text: "" });
+          } catch { alert("Не удалось загрузить картинку по этой ссылке."); }
+        })();
+      }
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [handleDropFiles, addElement]);
 
   const addTextEl = useCallback(() => {
     const p = parkingSpot(300, 60);
