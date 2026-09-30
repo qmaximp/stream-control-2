@@ -364,6 +364,23 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
     else ytUiRefs.current.delete(id);
   }, []);
 
+  // браузер ставит YouTube-плееры на паузу в скрытой вкладке — при возврате
+  // возобновляем всё, что играло до сворачивания (иначе видео «остаётся» на паузе)
+  const wasPlayingRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const onVis = () => {
+      if (document.hidden) {
+        wasPlayingRef.current.clear();
+        for (const [id, s] of ytStatesRef.current.entries()) if (s.st === 1) wasPlayingRef.current.add(id);
+      } else {
+        for (const id of wasPlayingRef.current) ytCommand(id, "playVideo");
+        wasPlayingRef.current.clear();
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [ytCommand]);
+
   // handshake: подписываемся на отчёты плееров превью (повторяем — если плеер загрузился позже).
   // ВАЖНО: всем embed-iframe, а не только первому — иначе перемотка/плей работают лишь у одного видео
   useEffect(() => {
@@ -371,9 +388,19 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
       document.querySelectorAll('iframe[title="embed"]').forEach((f) => {
         (f as HTMLIFrameElement).contentWindow?.postMessage(JSON.stringify({ event: "listening", id: 1, channel: "widget" }), "*");
       });
+      // выбранный играющий элемент раз в 5с подтверждаем оверлею: закрывает случай
+      // перезагрузившегося оверлея (рефреш OBS / переподключение) без действий пользователя
+      const sel = selectedIdRef.current;
+      if (sel) {
+        const st = ytStatesRef.current.get(sel);
+        if (st?.st === 1) {
+          emit("element:command", { id: sel, cmd: "playVideo" });
+          emit("element:command", { id: sel, cmd: "time", value: st.t });
+        }
+      }
     }, 5000);
     return () => clearInterval(t);
-  }, []);
+  }, [emit]);
 
   // интерактив iframe действует только пока выбран именно он
   useEffect(() => {
@@ -681,8 +708,9 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   const addIframeEl = useCallback(() => {
     const p = parkingSpot(560, 315);
     const url = prompt("Ссылка на сайт или YouTube (например, https://youtube.com/watch?v=...):");
-    // autoplay: видео сразу играет на оверлее (без звука — mute добавляется в embed)
-    if (url) addElement({ type: "iframe", src: url, ...p, width: 560, height: 315, text: "", autoplay: true });
+    // без autoplay: новое видео стоит на превью-заставке (как на референсе) —
+    // играет в панели и на оверлее только после нажатия play
+    if (url) addElement({ type: "iframe", src: url, ...p, width: 560, height: 315, text: "" });
   }, [addElement]);
 
   const addTextEl = useCallback(() => {
@@ -745,15 +773,24 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
 
   const handleMouseUp = useCallback(() => {
     const dr = dragRef.current;
-    if (dr?.type === "iframe" && !dr.moved) {
+    if (dr?.type === "iframe") {
       const el = stateRef.current.elements.find((x) => x.id === dr.id);
       if (el && isYouTubeSrc(el.src || "")) {
-        // клик по YouTube-видео — плей/пауза (интерактив iframe для YouTube не нужен,
-        // iframe всегда прозрачен для курсора: так работают и drag, и hover-плашка)
         const st = ytStatesRef.current.get(dr.id);
-        ytCommand(dr.id, st?.st === 1 ? "pauseVideo" : "playVideo");
-        ytUiRefs.current.get(dr.id)?.note();
-      } else {
+        if (dr.moved) {
+          // после перетаскивания подтягиваем оверлей к панели (синхронизация позиции/состояния:
+          // закрывает и случай, когда оверлей перезагрузился и стоит на заставке)
+          if (st?.st === 1) {
+            emit("element:command", { id: dr.id, cmd: "playVideo" });
+            emit("element:command", { id: dr.id, cmd: "time", value: st.t });
+          }
+        } else {
+          // клик по YouTube-видео — плей/пауза (интерактив iframe для YouTube не нужен,
+          // iframe всегда прозрачен для курсора: так работают и drag, и hover-плашка)
+          ytCommand(dr.id, st?.st === 1 ? "pauseVideo" : "playVideo");
+          ytUiRefs.current.get(dr.id)?.note();
+        }
+      } else if (!dr.moved) {
         // клик по сайту без перетаскивания = активируем интерактив (управление внутри)
         setInteractiveIframeId(dr.id);
       }

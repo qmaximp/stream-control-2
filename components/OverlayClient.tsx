@@ -2,7 +2,7 @@
 
 import type { StreamElement, SyncState } from '@/lib/types'
 import { useEffect, useRef, useState } from 'react'
-import { toEmbedUrl, withAutoplay, withMuted, withOrigin, withCleanPlayer } from '@/lib/embed'
+import { toEmbedUrl, withAutoplay, withMuted, withOrigin, withCleanPlayer, youtubeId } from '@/lib/embed'
 import { playFinishSound } from '@/lib/sound'
 import { noteServerClock, serverClockLag } from '@/lib/clock'
 import { io as ioInit } from 'socket.io-client'
@@ -20,6 +20,19 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 	})
 	const [, force] = useState(0)
 	const [scale, setScale] = useState(1)
+	// YouTube-элементы, которые уже «живые» в этой сессии оверлея: пришла команда из панели
+	// или плеер начал воспроизведение. Пока элемент не живой — поверх iframe чистая заставка
+	// (нативный постер YouTube с кнопками в стриме показывать нельзя)
+	const [ytLive, setYtLive] = useState<Set<string>>(new Set())
+	const markYtLive = (id: string) =>
+		setYtLive(prev => {
+			if (prev.has(id)) return prev
+			const s = new Set(prev)
+			s.add(id)
+			return s
+		})
+	// элементы, игравшие на момент сворачивания вкладки, — возобновляются при возврате
+	const resumeRef = useRef<Set<string>>(new Set())
 
 	useEffect(() => {
 		const socket = ioInit({ transports: ['websocket', 'polling'], query: { room: room || 'default' } })
@@ -64,6 +77,8 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 		socket.on('elements:cleared', () => setState(p => ({ ...p, elements: [] })))
 		// команды плееру из панели (пуск/пауза/громкость) — через YouTube postMessage API
 		socket.on('element:command', ({ id, cmd, value }: { id: string; cmd: string; value?: number }) => {
+			markYtLive(id)
+			resumeRef.current.delete(id) // панель сама управляет этим элементом — не возобновлять по видимости вкладки
 			if (cmd === 'time') {
 				// целевая позиция из превью: подтягиваемся сразу при расхождении > 2с —
 				// даже на паузе, иначе перемотка в панели не доезжает до оверлея
@@ -101,6 +116,7 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 				const t = d.info.currentTime ?? playerTimes.get(id)?.t
 				const st = d.info.playerState ?? playerTimes.get(id)?.st ?? 0
 				if (t !== undefined) playerTimes.set(id, { t, st })
+				if (st === 1 || t > 0.5) markYtLive(id)
 				const target = seekTargets.get(id)
 				if (t !== undefined && target !== undefined && st === 1 && Math.abs(t - target) > 2) {
 					iframeRefs.get(id)?.contentWindow?.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [target, true] }), '*')
@@ -135,6 +151,25 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 		return () => window.removeEventListener('resize', update)
 	}, [state.canvasW, state.canvasH])
 
+	// браузер ставит плееры на паузу в скрытой вкладке — при возврате возобновляем игравшее
+	useEffect(() => {
+		const onVis = () => {
+			if (document.hidden) {
+				resumeRef.current = new Set()
+				for (const [id, p] of playerTimes) if (p.st === 1) resumeRef.current.add(id)
+			} else {
+				for (const id of resumeRef.current)
+					iframeRefs.get(id)?.contentWindow?.postMessage(
+						JSON.stringify({ event: 'command', func: 'playVideo', args: [] }),
+						'*',
+					)
+				resumeRef.current.clear()
+			}
+		}
+		document.addEventListener('visibilitychange', onVis)
+		return () => document.removeEventListener('visibilitychange', onVis)
+	}, [])
+
 	const sorted = [...state.elements].sort(
 		(a, b) => (a.zIndex || 0) - (b.zIndex || 0),
 	)
@@ -160,17 +195,19 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 					overflow: 'hidden',
 				}}
 			>
-				{sorted.map(el =>
-					el.visible || el.alwaysLoaded ? (
-						<OverlayElement key={el.id} el={el} />
-					) : null,
-				)}
+				{sorted.map(el => {
+					const vid = el.type === 'iframe' ? youtubeId(el.src || '') : ''
+					const cover = !!vid && !el.autoplay && !ytLive.has(el.id)
+					return el.visible || el.alwaysLoaded ? (
+						<OverlayElement key={el.id} el={el} cover={cover} vid={vid} />
+					) : null
+				})}
 			</div>
 		</div>
 	)
 }
 
-function OverlayElement({ el }: { el: StreamElement }) {
+function OverlayElement({ el, cover, vid }: { el: StreamElement; cover?: boolean; vid?: string }) {
 	const [, force] = useState(0)
 	const playedRef = useRef(false)
 
@@ -231,6 +268,25 @@ function OverlayElement({ el }: { el: StreamElement }) {
 					allow='autoplay; encrypted-media; picture-in-picture'
 					allowFullScreen
 				/>
+				{cover && vid && (
+					<div
+						style={{ position: 'absolute', inset: 0, background: '#000', overflow: 'hidden' }}
+					>
+						<img
+							src={`https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`}
+							onError={(e) => {
+								const img = e.currentTarget
+								if (!img.dataset.fallback) {
+									img.dataset.fallback = '1'
+									img.src = `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`
+								}
+							}}
+							alt=''
+							draggable={false}
+							style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+						/>
+					</div>
+				)}
 			</div>
 		)
 	if (el.type === 'text')
