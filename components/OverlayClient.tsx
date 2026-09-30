@@ -2,7 +2,7 @@
 
 import type { StreamElement, SyncState } from '@/lib/types'
 import { useEffect, useRef, useState } from 'react'
-import { toEmbedUrl, withAutoplay, withMuted } from '@/lib/embed'
+import { toEmbedUrl, withAutoplay, withMuted, withOrigin, withCleanPlayer } from '@/lib/embed'
 import { playFinishSound } from '@/lib/sound'
 import { noteServerClock, serverClockLag } from '@/lib/clock'
 import { io as ioInit } from 'socket.io-client'
@@ -221,14 +221,14 @@ function OverlayElement({ el }: { el: StreamElement }) {
 		return (
 			<div style={style}>
 				<iframe
-					src={withMuted(withAutoplay(toEmbedUrl(el.src || ''), el.autoplay))}
+					src={withOrigin(withCleanPlayer(withMuted(withAutoplay(toEmbedUrl(el.src || ''), el.autoplay))))}
 					title='embed'
 					ref={(f) => {
 						if (f) iframeRefs.set(el.id, f)
 						else iframeRefs.delete(el.id)
 					}}
 					style={{ width: '100%', height: '100%', border: 'none' }}
-					allow='autoplay; encrypted-media; picture-in-picture; fullscreen'
+					allow='autoplay; encrypted-media; picture-in-picture'
 					allowFullScreen
 				/>
 			</div>

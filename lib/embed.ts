@@ -8,8 +8,40 @@ export function withAutoplay(url: string, on?: boolean): string {
 
 // embed-плеер YouTube стартует без звука: звук включается вручную в самом iframe
 export function withMuted(url: string): string {
-  if (!/youtube(-nocookie)?\.com\/embed\//.test(url)) return url;
+  if (!isYouTubeEmbed(url)) return url;
   return url + (url.includes("?") ? "&" : "?") + "mute=1";
+}
+
+export function isYouTubeEmbed(url: string): boolean {
+  return /youtube(-nocookie)?\.com\/embed\//.test(url || "");
+}
+
+export function isYouTubeSrc(src: string): boolean {
+  return isYouTubeEmbed(toEmbedUrl(src || ""));
+}
+
+// YouTube принимает postMessage-команды и шлёт состояние (infoDelivery) только
+// при origin, совпадающем со страницей-хостом: без него пауза/плей/громкость
+// из панели молча не доходят до оверлея
+export function withOrigin(url: string): string {
+  if (!isYouTubeEmbed(url) || typeof window === "undefined") return url;
+  return url + (url.includes("?") ? "&" : "?") + "origin=" + encodeURIComponent(window.location.origin);
+}
+
+// «чистый» плеер: без родной панели управления и рекомендаций. Управление берёт
+// на себя элемент панели (своя плашка), а оверлей всегда показывает чистый кадр —
+// родной UI YouTube на паузе не прячется и оставался бы в стриме
+export function withCleanPlayer(url: string): string {
+  if (!isYouTubeEmbed(url)) return url;
+  return url + (url.includes("?") ? "&" : "?") + "controls=0&rel=0&iv_load_policy=3&disablekb=1";
+}
+
+// ID видео из youtube-ссылки (для превью-заставки); "" — если это не одиночное видео
+export function youtubeId(src: string): string {
+  const embed = toEmbedUrl(src || "");
+  if (embed.includes("videoseries")) return ""; // плейлист — одиночной заставки нет
+  const m = /\/embed\/([A-Za-z0-9_-]+)/.exec(embed);
+  return m ? m[1] : "";
 }
 
 export function toEmbedUrl(raw: string): string {
