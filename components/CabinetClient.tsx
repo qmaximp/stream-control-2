@@ -484,7 +484,7 @@ export default function CabinetClient({
 					>
 						github
 					</a>
-					{' проекта | версия 1.1'}
+					{' проекта | Саверсия 1.2'}
 				</p>
 			</footer>
 		</main>
