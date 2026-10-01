@@ -3,7 +3,9 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io as ioInit, Socket } from "socket.io-client";
 import type { SyncState, StreamElement } from "@/lib/types";
-import { toEmbedUrl, isYouTubeLink } from "@/lib/embed";
+import { toEmbedUrl } from "@/lib/embed";
+import { parseMediaUrl, isMediaUrl, youtubeEmbedUrl } from "@/lib/media";
+import { MediaChrome, TwitchFrame, type MediaSt, type ChromeCtl } from "@/components/MediaPlayer";
 import { noteServerClock, serverClockLag } from "@/lib/clock";
 import { playFinishSound } from "@/lib/sound";
 import ObsPanel from "@/components/ObsPanel";
@@ -33,7 +35,18 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   const [emotePlatform, setEmotePlatform] = useState<"all" | "twitch" | "7tv" | "bttv" | "ffz">("all");
   const [emoteNotes, setEmoteNotes] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selectedIdRef = useRef<string | null>(null);
+  selectedIdRef.current = selectedId;
   const [interactiveIframeId, setInteractiveIframeId] = useState<string | null>(null);
+  // медиа-плееры (YouTube/Twitch): состояние элементов + SDK-плееры Twitch
+  const [mediaStates, setMediaStates] = useState<Map<string, MediaSt>>(new Map());
+  const mediaStatesRef = useRef<Map<string, MediaSt>>(mediaStates);
+  const twitchPlayers = useRef<Map<string, any>>(new Map());
+  const twitchStRef = useRef<Map<string, number>>(new Map()); // 1 играет / 2 пауза (из событий SDK)
+  const chromeCtlRefs = useRef<Map<string, ChromeCtl>>(new Map());
+  const lastYtCmdRef = useRef<Map<string, "play" | "pause">>(new Map());
+  const ccStatesRef = useRef<Map<string, number>>(new Map());
+  const lastTimeRelayRef = useRef(0);
   const [addSheet, setAddSheet] = useState<null | "image" | "video">(null);
   const [addSheetClosing, setAddSheetClosing] = useState(false);
   const addSheetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -151,6 +164,17 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
 
     socket.on("connect", () => setConnected(true));
     socket.on("disconnect", () => setConnected(false));
+    // оверлей (пере)подключился — отдаём ему текущее состояние играющего выбранного элемента
+    socket.on("overlay:hello", () => {
+      const sel = selectedIdRef.current;
+      if (!sel) return;
+      const st = mediaStatesRef.current.get(sel);
+      if (st?.st === 1) {
+        socket.emit("element:command", { id: sel, cmd: "play" });
+        socket.emit("element:command", { id: sel, cmd: "seek", value: st.t });
+        if (st.kind === "youtube") socket.emit("element:command", { id: sel, cmd: "cc", value: ccStatesRef.current.get(sel) ?? 0 });
+      }
+    });
     socket.on("state:init", (s: SyncState) => setState(s));
     socket.on("element:added", (el: StreamElement) =>
       setState((p) => ({ ...p, elements: [...p.elements, el] }))
@@ -269,6 +293,182 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
       emit("element:update", { id, ...merged });
     }, 120);
     pendingUpdatesRef.current.set(id, { partial: merged, timer });
+  }, [emit]);
+
+  // ===== медиа-плееры (YouTube / Twitch) =====
+  // Ретрансляция в оверлей: ТОЛЬКО выбранный элемент («пульт»), иначе две панели
+  // перетягивают плеер оверлея друг у друга
+  const relayMedia = useCallback((id: string, next: MediaSt, cur?: MediaSt) => {
+    if (id !== selectedIdRef.current) return;
+    if (next.st !== (cur?.st ?? -1)) {
+      if (next.st === 1) emit("element:command", { id, cmd: "play" });
+      else if (next.st === 2 || next.st === 0) emit("element:command", { id, cmd: "pause" });
+    }
+    // позиция — не чаще раза в секунду (оверлей подтягивается при дрейфе > 2с)
+    const now = performance.now();
+    if (next.st === 1 && now - lastTimeRelayRef.current >= 1000) {
+      lastTimeRelayRef.current = now;
+      emit("element:command", { id, cmd: "seek", value: next.t });
+    }
+    if (cur && next.muted !== cur.muted) emit("element:command", { id, cmd: next.muted ? "mute" : "unmute" });
+    if (cur && next.vol !== cur.vol) emit("element:command", { id, cmd: "volume", value: next.vol });
+  }, [emit]);
+
+  const applyMediaState = useCallback((id: string, patch: Partial<MediaSt>) => {
+    const cur = mediaStatesRef.current.get(id);
+    const base: MediaSt = cur ?? { vid: patch.vid ?? "", kind: patch.kind ?? "youtube", st: -1, t: 0, dur: 0, muted: true, vol: 100 };
+    const next: MediaSt = { ...base, ...patch };
+    if (cur && cur.vid === next.vid && cur.st === next.st && Math.abs(cur.t - next.t) < 0.25 &&
+      Math.abs(cur.dur - next.dur) < 0.5 && cur.muted === next.muted && Math.abs(cur.vol - next.vol) < 1) return;
+    const m = new Map(mediaStatesRef.current);
+    m.set(id, next);
+    mediaStatesRef.current = m;
+    setMediaStates(m);
+    relayMedia(id, next, cur);
+  }, [relayMedia]);
+
+  // команда локальному плееру элемента (YT — postMessage, Twitch — SDK)
+  const localMediaCommand = useCallback((id: string, cmd: string, value?: number) => {
+    const el = stateRef.current.elements.find((x) => x.id === id);
+    const info = el ? parseMediaUrl(el.src || "") : null;
+    if (info?.kind === "youtube") {
+      const f = document.querySelector(`iframe[data-id="${id}"]`) as HTMLIFrameElement | null;
+      if (!f?.contentWindow) return;
+      // handshake перед каждой командой: команды, ушедшие до готовности API,
+      // плеер молча игнорирует (handshake сразу перед командой гарантирует доставку)
+      f.contentWindow.postMessage(JSON.stringify({ event: "listening", id: 1, channel: "widget" }), "*");
+      const map: Record<string, [string, any[]]> = {
+        play: ["playVideo", []],
+        pause: ["pauseVideo", []],
+        seek: ["seekTo", [value ?? 0, true]],
+        volume: ["setVolume", [value ?? 100]],
+        mute: ["mute", []],
+        unmute: ["unMute", []],
+        cc: [value ? "loadModule" : "unloadModule", ["captions"]],
+      };
+      const [func, args] = map[cmd] ?? ["", []];
+      if (func) f.contentWindow.postMessage(JSON.stringify({ event: "command", func, args }), "*");
+      return;
+    }
+    const p = twitchPlayers.current.get(id);
+    if (!p) return;
+    try {
+      if (cmd === "play") p.play();
+      else if (cmd === "pause") p.pause();
+      else if (cmd === "seek") p.seek(value ?? 0);
+      else if (cmd === "volume") p.setVolume((value ?? 100) / 100);
+      else if (cmd === "mute") p.mute?.();
+      else if (cmd === "unmute") p.unmute?.();
+    } catch {}
+  }, []);
+
+  // команда: локальному плееру + сразу в оверлей (для действий плашки)
+  const mediaCommand = useCallback((id: string, cmd: string, value?: number) => {
+    if (cmd === "cc") ccStatesRef.current.set(id, value ?? 0);
+    localMediaCommand(id, cmd, value);
+    emit("element:command", { id, cmd, value });
+  }, [emit, localMediaCommand]);
+
+  // плей/пауза (клик по видео и кнопка на плашке); при буферизации (st=3) повторный
+  // клик означает паузу, а не ещё один play
+  const mediaToggle = useCallback((id: string) => {
+    const stNow = mediaStatesRef.current.get(id)?.st;
+    const playing = stNow === 1 || (stNow === 3 && lastYtCmdRef.current.get(id) === "play");
+    localMediaCommand(id, playing ? "pause" : "play");
+    lastYtCmdRef.current.set(id, playing ? "pause" : "play");
+    chromeCtlRefs.current.get(id)?.note();
+  }, [localMediaCommand]);
+
+  const registerChromeCtl = useCallback((id: string, ctl: ChromeCtl | null) => {
+    if (ctl) chromeCtlRefs.current.set(id, ctl);
+    else chromeCtlRefs.current.delete(id);
+  }, []);
+
+  // SDK-плеер Twitch смонтирован: подписываемся на события плей/пауза
+  const onTwitchPlayer = useCallback((id: string, p: any | null) => {
+    if (!p) {
+      twitchPlayers.current.delete(id);
+      twitchStRef.current.delete(id);
+      return;
+    }
+    twitchPlayers.current.set(id, p);
+    try {
+      const Tw = (window as any).Twitch;
+      if (Tw?.Player) {
+        p.addEventListener(Tw.Player.PLAY, () => { twitchStRef.current.set(id, 1); });
+        p.addEventListener(Tw.Player.PAUSE, () => { twitchStRef.current.set(id, 2); });
+      }
+    } catch {}
+  }, []);
+
+  // опрос Twitch-плееров: позиция/громкость для плашки и ретрансляции
+  useEffect(() => {
+    const i = setInterval(() => {
+      for (const [id, p] of twitchPlayers.current) {
+        try {
+          const t = p.getCurrentTime?.() ?? 0;
+          const dur = p.getDuration?.() ?? 0;
+          const vol = Math.round((p.getVolume?.() ?? 1) * 100);
+          const muted = typeof p.isMuted === "function" ? !!p.isMuted() : (mediaStatesRef.current.get(id)?.muted ?? true);
+          const st = twitchStRef.current.get(id) ?? -1;
+          const el = stateRef.current.elements.find((x) => x.id === id);
+          const info = el ? parseMediaUrl(el.src || "") : null;
+          const vid = info ? info.kind + ":" + ("channel" in info ? info.channel : "id" in info ? info.id : "slug" in info ? info.slug : "") : "";
+          applyMediaState(id, { vid, kind: "twitch", st, t, dur, muted, vol });
+        } catch {}
+      }
+    }, 1000);
+    return () => clearInterval(i);
+  }, [applyMediaState]);
+
+  // YouTube-плееры reports: infoDelivery → состояние элемента
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      let elId: string | null = null;
+      const nodes = document.querySelectorAll("iframe[data-id]");
+      for (const n of nodes) {
+        if ((n as HTMLIFrameElement).contentWindow === e.source) { elId = n.getAttribute("data-id"); break; }
+      }
+      if (!elId) return;
+      try {
+        const d = typeof e.data === "string" ? JSON.parse(e.data) : e.data;
+        // initialDelivery приходит после handshake и несёт duration/playerState,
+        // infoDelivery — периодические обновления позиции
+        if (!d || (d.event !== "infoDelivery" && d.event !== "initialDelivery") || !d.info) return;
+        const info = d.info;
+        const el = stateRef.current.elements.find((x) => x.id === elId);
+        const parsed = el ? parseMediaUrl(el.src || "") : null;
+        const vid = parsed?.kind === "youtube" ? "youtube:" + parsed.id : "";
+        if (!vid) return;
+        applyMediaState(elId, {
+          vid,
+          kind: "youtube",
+          st: info.playerState,
+          t: info.currentTime,
+          dur: info.duration,
+          muted: info.muted,
+          vol: info.volume !== undefined ? Math.round(info.volume) : undefined,
+        } as Partial<MediaSt>);
+      } catch {}
+    };
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, [applyMediaState]);
+
+  // выбранный играющий элемент раз в 5с подтверждаем оверлею (закрывает рефреш
+  // оверлея / переподключение без действий пользователя)
+  useEffect(() => {
+    const t = setInterval(() => {
+      const sel = selectedIdRef.current;
+      if (!sel) return;
+      const st = mediaStatesRef.current.get(sel);
+      if (st?.st === 1) {
+        emit("element:command", { id: sel, cmd: "play" });
+        emit("element:command", { id: sel, cmd: "seek", value: st.t });
+        if (st.kind === "youtube") emit("element:command", { id: sel, cmd: "cc", value: ccStatesRef.current.get(sel) ?? 0 });
+      }
+    }, 5000);
+    return () => clearInterval(t);
   }, [emit]);
 
   // интерактив iframe действует только пока выбран именно он
@@ -576,7 +776,7 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
 
   const addIframeEl = useCallback(() => {
     const p = parkingSpot(560, 315);
-    const url = prompt("Ссылка на сайт или YouTube (например, https://youtube.com/watch?v=...):");
+    const url = prompt("Ссылка на сайт, YouTube или Twitch (например, https://youtube.com/watch?v=...):");
     // без autoplay: новое видео стоит на превью-заставке (как на референсе) —
     // играет в панели и на оверлее только после нажатия play
     if (url) addElement({ type: "iframe", src: url, ...p, width: 560, height: 315, text: "" });
@@ -602,10 +802,10 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
         void handleDropFiles(files);
         return;
       }
-      // текстом — ссылка: YouTube → видео-элемент, картинка по расширению → картинка
+      // текстом — ссылка: YouTube/Twitch → медиа-элемент, картинка по расширению → картинка
       const text = (cd.getData("text/plain") || "").trim();
       if (!/^https?:\/\//i.test(text)) return;
-      if (isYouTubeLink(text)) {
+      if (isMediaUrl(text)) {
         e.preventDefault();
         const p = parkingSpot(560, 315);
         addElement({ type: "iframe", src: text, ...p, width: 560, height: 315, text: "" });
@@ -686,9 +886,16 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   );
 
   const handleMouseUp = useCallback(() => {
-    if (dragRef.current?.type === "iframe") {
-      // клик по iframe без перетаскивания = активируем интерактив (управление сайтом внутри)
-      setInteractiveIframeId(dragRef.current.moved ? null : dragRef.current.id);
+    const dr = dragRef.current;
+    if (dr?.type === "iframe" && !dr.moved) {
+      const el = stateRef.current.elements.find((x) => x.id === dr.id);
+      if (el && isMediaUrl(el.src || "")) {
+        // клик по медиа (YouTube/Twitch) — плей/пауза (iframe всегда прозрачен для курсора)
+        mediaToggle(dr.id);
+      } else {
+        // клик по сайту без перетаскивания = активируем интерактив (управление сайтом внутри)
+        setInteractiveIframeId(dr.id);
+      }
     }
     dragRef.current = null;
     document.body.classList.remove("dragging");
@@ -697,7 +904,7 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
       emit("element:move", lastMoveRef.current);
       lastMoveRef.current = null;
     }
-  }, [emit]);
+  }, [emit, mediaToggle]);
 
   useEffect(() => {
     window.addEventListener("pointermove", handleMouseMove);
@@ -1204,6 +1411,7 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
                   style={{ left: state.canvasW + 175, top: 0, height: state.canvasH, writingMode: "vertical-rl", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28 }}>зона предзагрузки элементов</span>
                 {state.elements.map((el) => {
                   const hs = 10 / view.s;
+                  const isMedia = el.type === "iframe" && !!parseMediaUrl(el.src || "");
                   return (
                       <div key={el.id} onPointerDown={(e) => handleDragStart(e, el)}
                         data-elwrap="1"
@@ -1214,8 +1422,14 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
                         outline: selectedId === el.id ? `${2 / view.s}px solid rgb(var(--c-accent2))` : undefined,
                         transform: `${el.rotation ? `rotate(${el.rotation}deg)` : ""}${el.flipH || el.flipV ? ` scale(${el.flipH ? -1 : 1}, ${el.flipV ? -1 : 1})` : ""}` || undefined,
                         touchAction: "none",
-                      }}>
-                        <PreviewElement el={el} scale={1} interactive={interactiveIframeId === el.id} />
+                      }}
+                        onPointerEnter={isMedia ? () => chromeCtlRefs.current.get(el.id)?.enter() : undefined}
+                        onPointerMove={isMedia ? () => chromeCtlRefs.current.get(el.id)?.note() : undefined}
+                        onPointerLeave={isMedia ? () => chromeCtlRefs.current.get(el.id)?.leave() : undefined}>
+                        <PreviewElement el={el} scale={1} interactive={interactiveIframeId === el.id} mounted={mounted}
+                          mediaSt={mediaStates.get(el.id)} chromeRegister={registerChromeCtl}
+                          mediaToggle={mediaToggle} mediaSelect={setSelectedId} mediaCommand={mediaCommand}
+                          onTwitchPlayer={onTwitchPlayer} />
                         {(() => {
                           const l = elementLocks[el.id];
                           return l && l.until > Date.now() && l.by !== (userLogin ?? "") ? (
@@ -1526,14 +1740,42 @@ function MoonIcon() {
   );
 }
 
-function PreviewElement({ el, scale, interactive }: { el: StreamElement; scale: number; interactive?: boolean }) {
+function PreviewElement({ el, scale, interactive, mounted, mediaSt, chromeRegister, mediaToggle, mediaSelect, mediaCommand, onTwitchPlayer }: {
+  el: StreamElement; scale: number; interactive?: boolean; mounted?: boolean;
+  mediaSt?: MediaSt; chromeRegister?: (id: string, ctl: ChromeCtl | null) => void;
+  mediaToggle?: (id: string) => void; mediaSelect?: (id: string) => void;
+  mediaCommand?: (id: string, cmd: string, value?: number) => void;
+  onTwitchPlayer?: (id: string, p: any | null) => void;
+}) {
   if (el.type === "image" || el.type === "gif") return <img src={el.src} alt="" className="w-full h-full object-fill pointer-events-none" draggable={false} />;
-  if (el.type === "iframe")
+  if (el.type === "iframe") {
+    const info = parseMediaUrl(el.src || "");
+    if (info && chromeRegister && mediaToggle && mediaSelect && mediaCommand && onTwitchPlayer) {
+      // медиа (YouTube/Twitch): чистый кадр + своя панель управления;
+      // iframe рендерится только после монтирования (origin известен только на клиенте)
+      return (
+        <>
+          {mounted ? (
+            info.kind === "youtube" ? (
+              <iframe src={youtubeEmbedUrl(info.id, window.location.origin)} title="media" data-id={el.id}
+                className="w-full h-full" style={{ border: 0, pointerEvents: "none" }}
+                allow="autoplay; encrypted-media; picture-in-picture" />
+            ) : (
+              <TwitchFrame el={el} onPlayer={onTwitchPlayer} />
+            )
+          ) : (
+            <div className="w-full h-full" style={{ background: "#000" }} />
+          )}
+          <MediaChrome el={el} st={mediaSt} register={chromeRegister} toggle={mediaToggle} select={mediaSelect} command={mediaCommand} />
+        </>
+      );
+    }
     return (
       <iframe src={toEmbedUrl(el.src || "")} title="embed" data-id={el.id}
         className="w-full h-full" style={{ border: 0, pointerEvents: interactive ? "auto" : "none" }}
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen />
     );
+  }
   if (el.type === "video") return <video src={el.src} className="w-full h-full object-fill pointer-events-none" muted loop autoPlay playsInline />;
   if (el.type === "text") return (
     <div className="w-full h-full flex items-center justify-center pointer-events-none overflow-hidden"

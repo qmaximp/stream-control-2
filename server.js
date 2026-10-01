@@ -334,6 +334,17 @@ app.prepare().then(() => {
 			}
 		})
 
+		// команды медиа-плееру из панели (плей/пауза/перемотка/звук/субтитры)
+		socket.on('element:command', data => {
+			if (!data || typeof data.id !== 'string' || typeof data.cmd !== 'string') return
+			socket.broadcast.to(room).emit('element:command', data)
+		})
+
+		// оверлей (пере)подключился — панель с выбранным играющим элементом отдаст состояние
+		socket.on('overlay:hello', () => {
+			socket.broadcast.to(room).emit('overlay:hello')
+		})
+
 		socket.on('elements:clear', () => {
 			state.elements = []
 			io.to(room).emit('elements:cleared')
