@@ -160,6 +160,8 @@ export function MediaChrome({
 					pointerEvents: visible ? 'auto' : 'none',
 					opacity: visible ? 1 : 0,
 					transition: 'opacity .25s',
+					// выше слоя ручек ресайза: иначе угловая ручка перекрывает кнопку play/pause
+					zIndex: 5,
 				}}
 				onPointerDown={e => {
 					e.stopPropagation()

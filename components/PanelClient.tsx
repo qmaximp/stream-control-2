@@ -46,7 +46,6 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   const chromeCtlRefs = useRef<Map<string, ChromeCtl>>(new Map());
   const lastYtCmdRef = useRef<Map<string, "play" | "pause">>(new Map());
   const ccStatesRef = useRef<Map<string, number>>(new Map());
-  const lastTimeRelayRef = useRef(0);
   const [addSheet, setAddSheet] = useState<null | "image" | "video">(null);
   const [addSheetClosing, setAddSheetClosing] = useState(false);
   const addSheetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -296,19 +295,21 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   }, [emit]);
 
   // ===== медиа-плееры (YouTube / Twitch) =====
-  // Ретрансляция в оверлей: ТОЛЬКО выбранный элемент («пульт»), иначе две панели
-  // перетягивают плеер оверлея друг у друга
+  // Ретрансляция в оверлей. Позиция (seek 1/с) — для ВСЕХ играющих элементов:
+  // если держать позицию только выбранного, у остальных на оверлее цель устаревает
+  // и дрейф-коррекция мотает их назад по кругу. Плей/пауза/звук — на смене состояния,
+  // а такие смены происходят при взаимодействии, которое всегда выбирает элемент.
+  const lastTimeRelayPerElRef = useRef<Map<string, number>>(new Map());
   const relayMedia = useCallback((id: string, next: MediaSt, cur?: MediaSt) => {
+    const now = performance.now();
+    if (next.st === 1 && now - (lastTimeRelayPerElRef.current.get(id) ?? 0) >= 1000) {
+      lastTimeRelayPerElRef.current.set(id, now);
+      emit("element:command", { id, cmd: "seek", value: next.t });
+    }
     if (id !== selectedIdRef.current) return;
     if (next.st !== (cur?.st ?? -1)) {
       if (next.st === 1) emit("element:command", { id, cmd: "play" });
       else if (next.st === 2 || next.st === 0) emit("element:command", { id, cmd: "pause" });
-    }
-    // позиция — не чаще раза в секунду (оверлей подтягивается при дрейфе > 2с)
-    const now = performance.now();
-    if (next.st === 1 && now - lastTimeRelayRef.current >= 1000) {
-      lastTimeRelayRef.current = now;
-      emit("element:command", { id, cmd: "seek", value: next.t });
     }
     if (cur && next.muted !== cur.muted) emit("element:command", { id, cmd: next.muted ? "mute" : "unmute" });
     if (cur && next.vol !== cur.vol) emit("element:command", { id, cmd: "volume", value: next.vol });
@@ -317,7 +318,11 @@ export default function PanelClient({ channel, room, userLogin }: { channel?: st
   const applyMediaState = useCallback((id: string, patch: Partial<MediaSt>) => {
     const cur = mediaStatesRef.current.get(id);
     const base: MediaSt = cur ?? { vid: patch.vid ?? "", kind: patch.kind ?? "youtube", st: -1, t: 0, dur: 0, muted: true, vol: 100 };
-    const next: MediaSt = { ...base, ...patch };
+    // периодические infoDelivery несут только позицию — undefined-поля патча
+    // НЕ должны затирать известное состояние (иначе панель «забывает» st/dur)
+    const clean: Partial<MediaSt> = {};
+    for (const [k, v] of Object.entries(patch)) if (v !== undefined) (clean as any)[k] = v;
+    const next: MediaSt = { ...base, ...clean };
     if (cur && cur.vid === next.vid && cur.st === next.st && Math.abs(cur.t - next.t) < 0.25 &&
       Math.abs(cur.dur - next.dur) < 0.5 && cur.muted === next.muted && Math.abs(cur.vol - next.vol) < 1) return;
     const m = new Map(mediaStatesRef.current);

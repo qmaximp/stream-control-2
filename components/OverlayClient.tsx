@@ -14,7 +14,11 @@ const ytFrames = new Map<string, HTMLIFrameElement>()
 const twitchPlayers = new Map<string, any>()
 const twitchSt = new Map<string, number>() // 1 играет / 2 пауза (из событий SDK)
 const playerTimes = new Map<string, { t: number; st: number }>()
-const seekTargets = new Map<string, number>()
+// цель позиции от панели + когда она обновлялась: дрейф-коррекция работает только
+// по СВЕЖЕЙ цели (панель шлёт её 1/с для играющих элементов). Устаревшая цель
+// (панель закрыта / видео остановлено в панели) отматывала бы плеер по кругу
+const seekTargets = new Map<string, { t: number; at: number }>()
+const FRESH_MS = 5000
 
 export default function OverlayClient({ room }: { room?: string | null }) {
 	const [state, setState] = useState<SyncState>({
@@ -93,7 +97,7 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 				else if (cmd === 'seek') {
 					// целевая позиция из превью: подтягиваемся при расхождении > 2с —
 					// даже на паузе; незапущенный плеер не трогаем (seek до старта его клинит)
-					seekTargets.set(id, value ?? 0)
+					seekTargets.set(id, { t: value ?? 0, at: Date.now() })
 					const cur = playerTimes.get(id)
 					const started = !!cur && (cur.st === 1 || cur.st === 2 || cur.st === 3)
 					if (started && cur && Math.abs(cur.t - (value ?? 0)) > 2) {
@@ -111,7 +115,7 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 					else if (cmd === 'mute') tp.mute?.()
 					else if (cmd === 'unmute') tp.unmute?.()
 					else if (cmd === 'seek') {
-						seekTargets.set(id, value ?? 0)
+						seekTargets.set(id, { t: value ?? 0, at: Date.now() })
 						const st = twitchSt.get(id)
 						const cur = playerTimes.get(id)
 						if (st === 1 && cur && Math.abs(cur.t - (value ?? 0)) > 2) tp.seek(value ?? 0)
@@ -144,8 +148,11 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 				if (t !== undefined) playerTimes.set(id, { t, st })
 				if (st === 1 || t > 0.5) markYtStarted(id)
 				const target = seekTargets.get(id)
-				if (t !== undefined && target !== undefined && st === 1 && Math.abs(t - target) > 2) {
-					ytFrames.get(id)?.contentWindow?.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [target, true] }), '*')
+				if (
+					t !== undefined && target !== undefined && st === 1 &&
+					Date.now() - target.at < FRESH_MS && Math.abs(t - target.t) > 2
+				) {
+					ytFrames.get(id)?.contentWindow?.postMessage(JSON.stringify({ event: 'command', func: 'seekTo', args: [target.t, true] }), '*')
 				}
 			} catch {}
 		}
@@ -169,7 +176,10 @@ export default function OverlayClient({ room }: { room?: string | null }) {
 					const st = twitchSt.get(id) ?? 0
 					playerTimes.set(id, { t, st })
 					const target = seekTargets.get(id)
-					if (st === 1 && target !== undefined && Math.abs(t - target) > 2) p.seek(target)
+					if (
+						st === 1 && target !== undefined &&
+						Date.now() - target.at < FRESH_MS && Math.abs(t - target.t) > 2
+					) p.seek(target.t)
 				} catch {}
 			}
 		}, 1000)
