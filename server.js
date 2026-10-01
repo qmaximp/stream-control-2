@@ -87,18 +87,35 @@ app.prepare().then(() => {
 		}
 	}
 
+	// доступ модератора к панели: приглашение принято и не отозвано/не приостановлено.
+	// Проверяется на каждое действие — отзыв доступа действует мгновенно, без обновления страницы
+	let invitesCache = { mtime: 0, data: {} }
+	function invitesData() {
+		try {
+			const file = path.join(__dirname, 'data', 'invites.json')
+			const mtime = fs.statSync(file).mtimeMs
+			if (invitesCache.mtime !== mtime) {
+				invitesCache = { mtime, data: JSON.parse(fs.readFileSync(file, 'utf8')) }
+			}
+			return invitesCache.data
+		} catch {
+			return {}
+		}
+	}
+	function hasPanelAccess(room, login) {
+		const owner = roomOwner(room)
+		if (!owner) return false // комната без владельца — панель не отдаём
+		if (login.toLowerCase() === owner.toLowerCase()) return true // стример — всегда
+		const entry = invitesData()[owner]?.moderators?.[login]
+		return !!entry && entry.status === 'accepted' && !entry.suspended
+	}
+
 	io.on('connection', socket => {
 		// комната из handshake (?room=токен), иначе общая default-комната
 		const room = ((socket.handshake.query.room || 'default') + '').slice(0, 64)
 		socket.join(room)
 		const roomRec = getRoom(room)
 		const state = roomRec.state
-
-		// любое событие от клиента считается активностью и отодвигает автоочистку
-		socket.use((event, next) => {
-			roomRec.lastActivity = Date.now()
-			next()
-		})
 
 		socket.emit('state:init', state)
 
@@ -112,7 +129,30 @@ app.prepare().then(() => {
 		// стример (владелец комнаты) может перехватывать элементы у модераторов всегда
 		const isStreamer =
 			!!roomOwner(room) && userLogin.toLowerCase() === roomOwner(room).toLowerCase()
+
+		// мгновенная проверка доступа: у отозванного модератора соединение закрывается
+		// и панель показывает «доступ отозван» (гость = оверлей, он только слушает)
+		const isGuest = userLogin === 'гость' || userLogin === 'гость'.toLowerCase()
+		if (!isGuest && !hasPanelAccess(room, userLogin)) {
+			console.log('[io] доступ отозван, отключаю:', userLogin, 'room:', room.slice(0, 12))
+			socket.emit('access:revoked')
+			socket.disconnect(true)
+			return
+		}
 		console.log('[io] connect:', socket.id, 'room:', room, 'login:', userLogin)
+
+		// любое событие от клиента считается активностью и отодвигает автоочистку;
+		// здесь же проверяем доступ: отзыв у модератора действует мгновенно
+		socket.use((event, next) => {
+			roomRec.lastActivity = Date.now()
+			if (!isGuest && !isStreamer && !hasPanelAccess(room, userLogin)) {
+				console.log('[io] доступ отозван на событии:', event, userLogin)
+				socket.emit('access:revoked')
+				socket.disconnect(true)
+				return next(new Error('access revoked'))
+			}
+			next()
+		})
 
 		socket.on('cursor:move', data => {
 			if (
