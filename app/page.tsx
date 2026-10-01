@@ -68,7 +68,7 @@ export default function Home({
 				>
 					github
 				</a>
-				{' проекта | Саверсия 1.2'}
+				{' проекта | Версия 1.2'}
 			</footer>
 		</main>
 	)
