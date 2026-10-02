@@ -10,7 +10,12 @@ import {
 import ObsPanel from '@/components/ObsPanel'
 import { noteServerClock, serverClockLag } from '@/lib/clock'
 import { toEmbedUrl } from '@/lib/embed'
-import { isMediaUrl, parseMediaUrl, youtubeEmbedUrl, loadTwitchSdk } from '@/lib/media'
+import {
+	isMediaUrl,
+	loadTwitchSdk,
+	parseMediaUrl,
+	youtubeEmbedUrl,
+} from '@/lib/media'
 import { playFinishSound } from '@/lib/sound'
 import type { StreamElement, SyncState } from '@/lib/types'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -267,7 +272,13 @@ export default function PanelClient({
 								...p,
 								elements: p.elements.map(e =>
 									e.id === id
-										? { ...e, x: snap.el.x, y: snap.el.y, width: snap.el.width, height: snap.el.height }
+										? {
+												...e,
+												x: snap.el.x,
+												y: snap.el.y,
+												width: snap.el.width,
+												height: snap.el.height,
+											}
 										: e,
 								),
 							}))
@@ -803,13 +814,7 @@ export default function PanelClient({
 			twitchPlayerRef.current = null
 			if (twitchPreviewRef.current) twitchPreviewRef.current.innerHTML = ''
 		}
-	}, [
-		previewOn,
-		channel,
-		mounted,
-		previewKey,
-		parentHost,
-	])
+	}, [previewOn, channel, mounted, previewKey, parentHost])
 
 	// статус эфира: пока показан плейсхолдер «не в эфире» — опрашиваем каждые 15 секунд,
 	// когда стрим играется — раз в минуту. Значение меняется только на точно известное
@@ -1273,7 +1278,9 @@ export default function PanelClient({
 		sy: number
 	} | null>(null)
 	// серверная позиция тащимого элемента: если лок перехватили — откатываем элемент сюда
-	const dragStartPosRef = useRef<{ id: string; x: number; y: number } | null>(null)
+	const dragStartPosRef = useRef<{ id: string; x: number; y: number } | null>(
+		null,
+	)
 	// снимок элемента на старте ресайза — для такого же отката
 	const resizeSnapRef = useRef<{ id: string; el: StreamElement } | null>(null)
 
@@ -1376,8 +1383,11 @@ export default function PanelClient({
 		(e: PointerEvent) => {
 			const gs = groupScaleRef.current
 			if (gs) {
-				gs.dx = e.clientX - gs.sx
-				gs.dy = e.clientY - gs.sy
+				// дельта курсора — в экранных пикселях: переводим в мировые (делим на зум),
+				// иначе при отдалении группа масштабируется медленнее курсора
+				const s = viewRef.current.s || 1
+				gs.dx = (e.clientX - gs.sx) / s
+				gs.dy = (e.clientY - gs.sy) / s
 				let fx = 1
 				let fy = 1
 				if (gs.corner.includes('e')) fx = (gs.bw + gs.dx) / gs.bw
@@ -1422,21 +1432,30 @@ export default function PanelClient({
 			}
 			const g = groupDragRef.current
 			if (g) {
-				g.dx = e.clientX - g.sx
-				g.dy = e.clientY - g.sy
+				// дельта курсора — в экранных пикселях: делим на зум, иначе при
+				// отдалении группа ползёт медленнее курсора
+				const s = viewRef.current.s || 1
+				g.dx = (e.clientX - g.sx) / s
+				g.dy = (e.clientY - g.sy) / s
 				const { dx, dy } = g
 				setState(p => ({
 					...p,
 					elements: p.elements.map(el => {
 						const it = g.items.find(i => i.id === el.id)
-						return it ? { ...el, x: Math.round(it.x + dx), y: Math.round(it.y + dy) } : el
+						return it
+							? { ...el, x: Math.round(it.x + dx), y: Math.round(it.y + dy) }
+							: el
 					}),
 				}))
 				const now = performance.now()
 				if (now - g.lastTick >= 33) {
 					g.lastTick = now
 					g.items.forEach(it =>
-						emit('element:move', { id: it.id, x: Math.round(it.x + dx), y: Math.round(it.y + dy) }),
+						emit('element:move', {
+							id: it.id,
+							x: Math.round(it.x + dx),
+							y: Math.round(it.y + dy),
+						}),
 					)
 				}
 				return
@@ -1494,8 +1513,7 @@ export default function PanelClient({
 			g.items.forEach(it => {
 				const x = Math.round(it.x + g.dx)
 				const y = Math.round(it.y + g.dy)
-				if (x !== it.x || y !== it.y)
-					emit('element:move', { id: it.id, x, y })
+				if (x !== it.x || y !== it.y) emit('element:move', { id: it.id, x, y })
 			})
 			groupDragRef.current = null
 			document.body.classList.remove('dragging')
@@ -1567,7 +1585,13 @@ export default function PanelClient({
 			if (e.button !== 0 || !groupBox) return
 			e.preventDefault()
 			e.stopPropagation()
-			const items: { id: string; x: number; y: number; w: number; h: number }[] = []
+			const items: {
+				id: string
+				x: number
+				y: number
+				w: number
+				h: number
+			}[] = []
 			for (const id of selectedIdsRef.current) {
 				const it = stateRef.current.elements.find(x => x.id === id)
 				if (it && !it.locked && !isLockedByOther(id))
@@ -1869,7 +1893,12 @@ export default function PanelClient({
 					x1: e.clientX - rect.left,
 					y1: e.clientY - rect.top,
 				}
-				setMarquee({ x1: marquee.x1, y1: marquee.y1, x2: marquee.x1, y2: marquee.y1 })
+				setMarquee({
+					x1: marquee.x1,
+					y1: marquee.y1,
+					x2: marquee.x1,
+					y2: marquee.y1,
+				})
 				return
 			}
 			pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
@@ -1937,10 +1966,14 @@ export default function PanelClient({
 				e.preventDefault()
 				// экран -> мир
 				const s = viewRef.current.s
-				const wx1 = (Math.min(m.x1, e.clientX - rect.left) - viewRef.current.x) / s
-				const wy1 = (Math.min(m.y1, e.clientY - rect.top) - viewRef.current.y) / s
-				const wx2 = (Math.max(m.x1, e.clientX - rect.left) - viewRef.current.x) / s
-				const wy2 = (Math.max(m.y1, e.clientY - rect.top) - viewRef.current.y) / s
+				const wx1 =
+					(Math.min(m.x1, e.clientX - rect.left) - viewRef.current.x) / s
+				const wy1 =
+					(Math.min(m.y1, e.clientY - rect.top) - viewRef.current.y) / s
+				const wx2 =
+					(Math.max(m.x1, e.clientX - rect.left) - viewRef.current.x) / s
+				const wy2 =
+					(Math.max(m.y1, e.clientY - rect.top) - viewRef.current.y) / s
 				if (wx2 - wx1 < 5 && wy2 - wy1 < 5) {
 					// клик по пустому — снять выделение
 					setSelectedIds(new Set())
@@ -2028,16 +2061,14 @@ export default function PanelClient({
 	return (
 		<div className='h-[100dvh] overflow-hidden flex flex-col bg-bg'>
 			{accessRevoked && (
-				<div
-					className='fixed inset-0 z-[200] bg-bg flex flex-col items-center justify-center text-center px-4'
-				>
+				<div className='fixed inset-0 z-[200] bg-bg flex flex-col items-center justify-center text-center px-4'>
 					<div className='text-5xl mb-4'>🚫</div>
 					<h1 className='text-xl font-semibold text-white mb-2'>
 						Доступ отозван
 					</h1>
 					<p className='text-sm text-gray-500 max-w-sm mb-6'>
-						Стример отозвал доступ к панели. Обновите страницу, чтобы
-						проверить доступ ещё раз.
+						Стример отозвал доступ к панели. Обновите страницу, чтобы проверить
+						доступ ещё раз.
 					</p>
 					<a href='/' className='text-sm text-accent2 hover:underline'>
 						На главную
@@ -2348,7 +2379,7 @@ export default function PanelClient({
                   автовоспроизведение Twitch-плеера), позиционируем в экранных координатах view.
                   Чёрный квадрат холста со стримом внутри, скейлится вместе с зумом */}
 						<div
-							className='absolute bg-black border border-border rounded-md pointer-events-none overflow-hidden'
+							className='absolute bg-black border border-border rounded-sm pointer-events-none overflow-hidden'
 							style={{
 								left: view.x,
 								top: view.y,
@@ -2374,7 +2405,7 @@ export default function PanelClient({
 									className='absolute inset-0'
 								/>
 							)}
-					</div>
+						</div>
 						<div
 							className='absolute left-0 top-0'
 							style={{
@@ -2656,27 +2687,75 @@ export default function PanelClient({
 										}}
 									/>
 									{(
-										[['n', groupBox.x + groupBox.w / 2 - 30, groupBox.y - 5, 60, 10],
-										['s', groupBox.x + groupBox.w / 2 - 30, groupBox.y + groupBox.h - 5, 60, 10],
-										['w', groupBox.x - 5, groupBox.y + groupBox.h / 2 - 30, 10, 60],
-										['e', groupBox.x + groupBox.w - 5, groupBox.y + groupBox.h / 2 - 30, 10, 60],
-									] as const)
-									.map(([k, left, top, w, h]) => (
+										[
+											[
+												'n',
+												groupBox.x + groupBox.w / 2 - 30,
+												groupBox.y - 5,
+												60,
+												10,
+											],
+											[
+												's',
+												groupBox.x + groupBox.w / 2 - 30,
+												groupBox.y + groupBox.h - 5,
+												60,
+												10,
+											],
+											[
+												'w',
+												groupBox.x - 5,
+												groupBox.y + groupBox.h / 2 - 30,
+												10,
+												60,
+											],
+											[
+												'e',
+												groupBox.x + groupBox.w - 5,
+												groupBox.y + groupBox.h / 2 - 30,
+												10,
+												60,
+											],
+										] as const
+									).map(([k, left, top, w, h]) => (
 										<div
 											key={'edge-' + k}
 											className='absolute pointer-events-auto'
 											data-nopan='1'
-											style={{ left, top, width: w, height: h, cursor: 'move', touchAction: 'none' }}
+											style={{
+												left,
+												top,
+												width: w,
+												height: h,
+												cursor: 'move',
+												touchAction: 'none',
+											}}
 											onPointerDown={startGroupMove}
 										/>
 									))}
 									{(
-										[['nw', groupBox.x, groupBox.y, 'nwse-resize'],
-										['ne', groupBox.x + groupBox.w, groupBox.y, 'nesw-resize'],
-										['sw', groupBox.x, groupBox.y + groupBox.h, 'nesw-resize'],
-										['se', groupBox.x + groupBox.w, groupBox.y + groupBox.h, 'nwse-resize'],
-									] as const)
-									.map(([corner, left, top, cursor]) => (
+										[
+											['nw', groupBox.x, groupBox.y, 'nwse-resize'],
+											[
+												'ne',
+												groupBox.x + groupBox.w,
+												groupBox.y,
+												'nesw-resize',
+											],
+											[
+												'sw',
+												groupBox.x,
+												groupBox.y + groupBox.h,
+												'nesw-resize',
+											],
+											[
+												'se',
+												groupBox.x + groupBox.w,
+												groupBox.y + groupBox.h,
+												'nwse-resize',
+											],
+										] as const
+									).map(([corner, left, top, cursor]) => (
 										<div
 											key={corner}
 											className='absolute pointer-events-auto'
@@ -3312,7 +3391,8 @@ function PreviewElement({
 								data-id={el.id}
 								className='w-full h-full'
 								style={{ border: 0, pointerEvents: 'none' }}
-								allow='autoplay; encrypted-media; picture-in-picture'
+								allow='autoplay; fullscreen'
+								sandbox='allow-modals allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-storage-access-by-user-activation'
 							/>
 						) : (
 							<TwitchFrame el={el} onPlayer={onTwitchPlayer} />
