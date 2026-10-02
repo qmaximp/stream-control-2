@@ -13,7 +13,7 @@ import { toEmbedUrl } from '@/lib/embed'
 import { isMediaUrl, parseMediaUrl, youtubeEmbedUrl, loadTwitchSdk } from '@/lib/media'
 import { playFinishSound } from '@/lib/sound'
 import type { StreamElement, SyncState } from '@/lib/types'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { io as ioInit, Socket } from 'socket.io-client'
 
 const CANVAS_W = 1920
@@ -743,13 +743,9 @@ export default function PanelClient({
 	// поэтому после READY/PAUSE дёргаем play() по расписанию (~40 секунд страховки)
 	const twitchPreviewRef = useRef<HTMLDivElement | null>(null)
 	const twitchPlayerRef = useRef<any>(null)
-	// живой плеер прячется, когда канвас на экране уже 180px (иначе микроплеер ломается)
-	const [playerActive, setPlayerActive] = useState(true)
 
 	useEffect(() => {
 		if (!previewOn || !channel || !mounted) return
-		// холст сильно отдалён — плеер в микроразмере ломается, не рендерим его вовсе
-		if (!playerActive) return
 		const target = twitchPreviewRef.current
 		if (!target) return
 		let cancelled = false
@@ -813,7 +809,6 @@ export default function PanelClient({
 		mounted,
 		previewKey,
 		parentHost,
-		playerActive,
 	])
 
 	// статус эфира: пока показан плейсхолдер «не в эфире» — опрашиваем каждые 15 секунд,
@@ -1362,9 +1357,69 @@ export default function PanelClient({
 		items: { id: string; x: number; y: number }[]
 		lastTick: number
 	} | null>(null)
+	// масштабирование группы за угловую ручку бокса
+	const groupScaleRef = useRef<{
+		sx: number
+		sy: number
+		dx: number
+		dy: number
+		bx: number
+		by: number
+		bw: number
+		bh: number
+		corner: string
+		items: { id: string; x: number; y: number; w: number; h: number }[]
+		lastTick: number
+	} | null>(null)
 
 	const handleMouseMove = useCallback(
 		(e: PointerEvent) => {
+			const gs = groupScaleRef.current
+			if (gs) {
+				gs.dx = e.clientX - gs.sx
+				gs.dy = e.clientY - gs.sy
+				let fx = 1
+				let fy = 1
+				if (gs.corner.includes('e')) fx = (gs.bw + gs.dx) / gs.bw
+				if (gs.corner.includes('w')) fx = (gs.bw - gs.dx) / gs.bw
+				if (gs.corner.includes('s')) fy = (gs.bh + gs.dy) / gs.bh
+				if (gs.corner.includes('n')) fy = (gs.bh - gs.dy) / gs.bh
+				fx = Math.max(0.05, fx)
+				fy = Math.max(0.05, fy)
+				// неподвижный угол — противоположный тянемому
+				const ox = gs.corner.includes('w') ? gs.bx + gs.bw : gs.bx
+				const oy = gs.corner.includes('n') ? gs.by + gs.bh : gs.by
+				setState(p => ({
+					...p,
+					elements: p.elements.map(el => {
+						const it = gs.items.find(i => i.id === el.id)
+						if (!it) return el
+						return {
+							...el,
+							x: Math.round(ox + (it.x - ox) * fx),
+							y: Math.round(oy + (it.y - oy) * fy),
+							width: Math.max(4, Math.round(it.w * fx)),
+							height: Math.max(4, Math.round(it.h * fy)),
+						}
+					}),
+				}))
+				const now = performance.now()
+				if (now - gs.lastTick >= 33) {
+					gs.lastTick = now
+					gs.items.forEach(it => {
+						const el = stateRef.current.elements.find(x => x.id === it.id)
+						if (el)
+							emit('element:resize', {
+								id: it.id,
+								x: el.x,
+								y: el.y,
+								width: el.width,
+								height: el.height,
+							})
+					})
+				}
+				return
+			}
 			const g = groupDragRef.current
 			if (g) {
 				g.dx = e.clientX - g.sx
@@ -1415,6 +1470,24 @@ export default function PanelClient({
 	)
 
 	const handleMouseUp = useCallback(() => {
+		const gs = groupScaleRef.current
+		if (gs) {
+			// финальные размеры группы
+			gs.items.forEach(it => {
+				const el = stateRef.current.elements.find(x => x.id === it.id)
+				if (el)
+					emit('element:resize', {
+						id: it.id,
+						x: el.x,
+						y: el.y,
+						width: el.width,
+						height: el.height,
+					})
+			})
+			groupScaleRef.current = null
+			document.body.classList.remove('dragging')
+			return
+		}
 		const g = groupDragRef.current
 		if (g) {
 			// финальная позиция группы
@@ -1447,6 +1520,78 @@ export default function PanelClient({
 			lastMoveRef.current = null
 		}
 	}, [emit, mediaToggle])
+
+	// групповой бокс выделения: общие границы выбранных элементов
+	const groupBox = useMemo(() => {
+		if (selectedIds.size < 2) return null
+		const items = stateRef.current.elements.filter(e => selectedIds.has(e.id))
+		if (items.length < 2) return null
+		const x1 = Math.min(...items.map(e => e.x))
+		const y1 = Math.min(...items.map(e => e.y))
+		const x2 = Math.max(...items.map(e => e.x + e.width))
+		const y2 = Math.max(...items.map(e => e.y + e.height))
+		return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }
+	}, [state, selectedIds])
+
+	// тянем грань бокса — двигаем группу (тот же groupDrag, что и при драге элемента)
+	const startGroupMove = useCallback(
+		(e: React.PointerEvent) => {
+			if (e.button !== 0) return
+			e.preventDefault()
+			e.stopPropagation()
+			const items: { id: string; x: number; y: number }[] = []
+			for (const id of selectedIdsRef.current) {
+				const it = stateRef.current.elements.find(x => x.id === id)
+				if (it && !it.locked && !isLockedByOther(id)) {
+					items.push({ id, x: it.x, y: it.y })
+					emit('element:grab', { id })
+				}
+			}
+			if (items.length < 2) return
+			groupDragRef.current = {
+				sx: e.clientX,
+				sy: e.clientY,
+				dx: 0,
+				dy: 0,
+				items,
+				lastTick: 0,
+			}
+			document.body.classList.add('dragging')
+		},
+		[emit, isLockedByOther],
+	)
+
+	// тянем угловую ручку бокса — масштабируем всю группу
+	const startGroupScale = useCallback(
+		(e: React.PointerEvent, corner: string) => {
+			if (e.button !== 0 || !groupBox) return
+			e.preventDefault()
+			e.stopPropagation()
+			const items: { id: string; x: number; y: number; w: number; h: number }[] = []
+			for (const id of selectedIdsRef.current) {
+				const it = stateRef.current.elements.find(x => x.id === id)
+				if (it && !it.locked && !isLockedByOther(id))
+					items.push({ id, x: it.x, y: it.y, w: it.width, h: it.height })
+			}
+			if (items.length < 2) return
+			items.forEach(it => emit('element:grab', { id: it.id }))
+			groupScaleRef.current = {
+				sx: e.clientX,
+				sy: e.clientY,
+				dx: 0,
+				dy: 0,
+				bx: groupBox.x,
+				by: groupBox.y,
+				bw: groupBox.w,
+				bh: groupBox.h,
+				corner,
+				items,
+				lastTick: 0,
+			}
+			document.body.classList.add('dragging')
+		},
+		[groupBox, emit, isLockedByOther],
+	)
 
 	useEffect(() => {
 		window.addEventListener('pointermove', handleMouseMove)
@@ -1854,13 +1999,6 @@ export default function PanelClient({
 	}
 
 	// пилюля Превью: на ПК и мобильном — закреплена в правом нижнем углу окна превью
-	// ширина канваса на экране — от неё зависит, какой текст плейсхолдера помещается
-	const previewBoxW = state.canvasW * view.s
-	// гистерезис 180/220px, чтобы плеер не мигал на границе порога
-	useEffect(() => {
-		if (previewBoxW < 180) setPlayerActive(false)
-		else if (previewBoxW > 220) setPlayerActive(true)
-	}, [previewBoxW])
 	const previewPill = (
 		<div
 			className='absolute right-4 bottom-3 z-10 flex items-center gap-2 bg-panel border border-border rounded-full pl-3 pr-3 py-1.5 pointer-events-auto'
@@ -2205,9 +2343,20 @@ export default function PanelClient({
 						}}
 					>
 						{/* фон канваса + превью: ВНЕ transform-контейнера (transform предка блокирует
-                  автовоспроизведение Twitch-плеера), позиционируем в экранных координатах view */}
+                  автовоспроизведение Twitch-плеера). Как в pogly: стрим всегда на весь
+                  экран редактора и НЕ скейлится зумом; рамка отмечает границы холста */}
+						{mounted && previewOn && channel && (
+							<div className='absolute inset-0 bg-black overflow-hidden'>
+								<div
+									key={previewKey}
+									ref={twitchPreviewRef}
+									id='twitch-preview'
+									className='absolute inset-0'
+								/>
+							</div>
+						)}
 						<div
-							className='absolute bg-black border border-border rounded-md pointer-events-none overflow-hidden'
+							className='absolute bg-transparent border border-border rounded-md pointer-events-none'
 							style={{
 								left: view.x,
 								top: view.y,
@@ -2215,8 +2364,7 @@ export default function PanelClient({
 								height: state.canvasH * view.s,
 							}}
 						>
-							{/* решётка-текстура только пока стрим не показан: поверх видео её не кладём */}
-							{!(mounted && previewOn && channel && playerActive) && (
+							{!(mounted && previewOn && channel) && (
 								<div
 									className='absolute inset-0 opacity-10'
 									style={{
@@ -2226,42 +2374,6 @@ export default function PanelClient({
 									}}
 								/>
 							)}
-							{mounted && previewOn && channel && playerActive && (
-								<div
-									key={previewKey}
-									ref={twitchPreviewRef}
-									id='twitch-preview'
-									className='absolute inset-0'
-								/>
-							)}
-							{/* холст сильно отдалён: вместо сломанного микроплеера — чистый бейдж LIVE */}
-							{mounted &&
-								previewOn &&
-								channel &&
-								!playerActive && (
-									<div className='absolute inset-0 flex items-center justify-center pointer-events-none'>
-										<span
-											className='flex items-center rounded-md bg-black/75 text-white font-bold tracking-wide'
-											style={{
-												gap: Math.max(2, Math.min(6, previewBoxW * 0.012)),
-												padding: `${Math.max(2, Math.min(6, previewBoxW * 0.012))}px ${Math.max(4, Math.min(10, previewBoxW * 0.02))}px`,
-												fontSize: Math.max(
-													7,
-													Math.min(14, previewBoxW * 0.035),
-												),
-											}}
-										>
-											<span
-												className='rounded-full bg-red-600'
-												style={{
-													width: Math.max(4, Math.min(10, previewBoxW * 0.02)),
-													height: Math.max(4, Math.min(10, previewBoxW * 0.02)),
-												}}
-											/>
-											LIVE
-										</span>
-									</div>
-								)}
 					</div>
 						<div
 							className='absolute left-0 top-0'
@@ -2529,6 +2641,62 @@ export default function PanelClient({
 									</div>
 								)
 							})}
+							{/* групповой бокс выделения (как в pogly): тянешь грани — двигается группа,
+							 угловая ручка — масштабирует всю группу */}
+							{groupBox && selectedIds.size > 1 && (
+								<>
+									<div
+										className='absolute border border-dashed pointer-events-none'
+										style={{
+											left: groupBox.x,
+											top: groupBox.y,
+											width: groupBox.w,
+											height: groupBox.h,
+											borderColor: 'rgb(var(--c-accent2))',
+										}}
+									/>
+									{(
+										[['n', groupBox.x + groupBox.w / 2 - 30, groupBox.y - 5, 60, 10],
+										['s', groupBox.x + groupBox.w / 2 - 30, groupBox.y + groupBox.h - 5, 60, 10],
+										['w', groupBox.x - 5, groupBox.y + groupBox.h / 2 - 30, 10, 60],
+										['e', groupBox.x + groupBox.w - 5, groupBox.y + groupBox.h / 2 - 30, 10, 60],
+									] as const)
+									.map(([k, left, top, w, h]) => (
+										<div
+											key={'edge-' + k}
+											className='absolute pointer-events-auto'
+											data-nopan='1'
+											style={{ left, top, width: w, height: h, cursor: 'move', touchAction: 'none' }}
+											onPointerDown={startGroupMove}
+										/>
+									))}
+									{(
+										[['nw', groupBox.x, groupBox.y, 'nwse-resize'],
+										['ne', groupBox.x + groupBox.w, groupBox.y, 'nesw-resize'],
+										['sw', groupBox.x, groupBox.y + groupBox.h, 'nesw-resize'],
+										['se', groupBox.x + groupBox.w, groupBox.y + groupBox.h, 'nwse-resize'],
+									] as const)
+									.map(([corner, left, top, cursor]) => (
+										<div
+											key={corner}
+											className='absolute pointer-events-auto'
+											data-nopan='1'
+											style={{
+												left: left - 5 / view.s,
+												top: top - 5 / view.s,
+												width: 10 / view.s,
+												height: 10 / view.s,
+												background: 'rgb(var(--c-accent2))',
+												border: `${2 / view.s}px solid #fff`,
+												borderRadius: 2,
+												cursor,
+												touchAction: 'none',
+											}}
+											onPointerDown={e => startGroupScale(e, corner)}
+										/>
+									))}
+								</>
+							)}
 							{/* курсоры других участников: контр-скейл, чтобы курсор был одного размера на любом зуме */}
 							{remoteCursors
 								.filter(c => !c.hidden)
