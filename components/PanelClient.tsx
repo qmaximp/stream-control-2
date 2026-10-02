@@ -151,6 +151,12 @@ export default function PanelClient({
 		setCanvasEl(prev => (prev === el ? prev : el))
 	}, [])
 	const baseViewRef = useRef<{ x: number; y: number; s: number } | null>(null)
+	// минимальный абсолютный масштаб: отдаляться можно до 5% от базового (вписанного) вида —
+	// дальше холст становится микроскопическим, а превью Twitch нечитаемым
+	const minScale = useCallback(() => {
+		const base = baseViewRef.current?.s
+		return base ? base * 0.05 : 0.001
+	}, [])
 	// свежий стейт для колбэков, замороженных useCallback'ом (паркинг считает каскад по актуальным элементам)
 	const stateRef = useRef(state)
 	stateRef.current = state
@@ -1799,7 +1805,7 @@ export default function PanelClient({
 			e.preventDefault()
 			const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
 			const { x, y, s } = viewRef.current
-			const ns = Math.min(200, Math.max(0.001, s * factor))
+			const ns = Math.min(200, Math.max(minScale(), s * factor))
 			if (ns === s) return
 			const rect = vp.getBoundingClientRect()
 			const mx = e.clientX - rect.left,
@@ -1819,7 +1825,7 @@ export default function PanelClient({
 		const vp = viewportRef.current
 		if (!vp) return
 		const { x, y, s } = viewRef.current
-		const ns = Math.min(200, Math.max(0.001, s * factor))
+		const ns = Math.min(200, Math.max(minScale(), s * factor))
 		if (ns === s) return
 		const mx = vp.clientWidth / 2,
 			my = vp.clientHeight / 2
@@ -1937,7 +1943,7 @@ export default function PanelClient({
 				const rect = vp.getBoundingClientRect()
 				const mx = (a.x + b.x) / 2 - rect.left
 				const my = (a.y + b.y) / 2 - rect.top
-				const ns = Math.min(200, Math.max(0.05, pinch.s0 * (d / pinch.d0)))
+				const ns = Math.min(200, Math.max(minScale(), pinch.s0 * (d / pinch.d0)))
 				setView({
 					s: ns,
 					x: mx - ((mx - pinch.vx) / pinch.s0) * ns,
@@ -2032,6 +2038,13 @@ export default function PanelClient({
 	}
 
 	// пилюля Превью: на ПК и мобильном — закреплена в правом нижнем углу окна превью
+	// бокс превью: скейлится с зумом, но не меньше 320px по ширине на экране —
+	// при сильном отдалении остаётся читаемым (как в pogly), центр — на центре холста
+	const pvMinW = 320
+	const pvW = Math.max(state.canvasW * view.s, pvMinW)
+	const pvH = Math.max(state.canvasH * view.s, (pvW * state.canvasH) / state.canvasW)
+	const pvX = view.x + (state.canvasW * view.s - pvW) / 2
+	const pvY = view.y + (state.canvasH * view.s - pvH) / 2
 	const previewPill = (
 		<div
 			className='absolute right-4 bottom-3 z-10 flex items-center gap-2 bg-panel border border-border rounded-full pl-3 pr-3 py-1.5 pointer-events-auto'
@@ -2376,15 +2389,15 @@ export default function PanelClient({
 						}}
 					>
 						{/* фон канваса + превью: ВНЕ transform-контейнера (transform предка блокирует
-                  автовоспроизведение Twitch-плеера), позиционируем в экранных координатах view.
-                  Чёрный квадрат холста со стримом внутри, скейлится вместе с зумом */}
+                  автовоспроизведение Twitch-плеера). Бокс скейлится с зумом, но не меньше
+                  320px по ширине на экране — при отдалении остаётся читаемым, как в pogly */}
 						<div
-							className='absolute bg-black border border-border rounded-sm pointer-events-none overflow-hidden'
+							className='absolute bg-black border border-border rounded-md pointer-events-none overflow-hidden'
 							style={{
-								left: view.x,
-								top: view.y,
-								width: state.canvasW * view.s,
-								height: state.canvasH * view.s,
+								left: pvX,
+								top: pvY,
+								width: pvW,
+								height: pvH,
 							}}
 						>
 							{!(mounted && previewOn && channel) && (
@@ -2405,7 +2418,7 @@ export default function PanelClient({
 									className='absolute inset-0'
 								/>
 							)}
-						</div>
+					</div>
 						<div
 							className='absolute left-0 top-0'
 							style={{
