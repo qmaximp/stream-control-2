@@ -10,7 +10,7 @@ import {
 import ObsPanel from '@/components/ObsPanel'
 import { noteServerClock, serverClockLag } from '@/lib/clock'
 import { toEmbedUrl } from '@/lib/embed'
-import { isMediaUrl, parseMediaUrl, youtubeEmbedUrl } from '@/lib/media'
+import { isMediaUrl, parseMediaUrl, youtubeEmbedUrl, loadTwitchSdk } from '@/lib/media'
 import { playFinishSound } from '@/lib/sound'
 import type { StreamElement, SyncState } from '@/lib/types'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -61,6 +61,18 @@ export default function PanelClient({
 	const [selectedId, setSelectedId] = useState<string | null>(null)
 	const selectedIdRef = useRef<string | null>(null)
 	selectedIdRef.current = selectedId
+	// мультивыделение: рамкой по пустому холсту (мышь) или ctrl+клик;
+	// драг любого выбранного двигает всю группу, Delete удаляет все выбранные
+	const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+	const selectedIdsRef = useRef<Set<string>>(new Set())
+	selectedIdsRef.current = selectedIds
+	// рамка выделения: координаты относительно вьюпорта холста
+	const [marquee, setMarquee] = useState<{
+		x1: number
+		y1: number
+		x2: number
+		y2: number
+	} | null>(null)
 	const [interactiveIframeId, setInteractiveIframeId] = useState<string | null>(
 		null,
 	)
@@ -171,7 +183,9 @@ export default function PanelClient({
 			'(orientation: portrait) and (max-width: 820px) and (pointer: coarse)',
 		)
 		const mq = window.matchMedia(
-			'(max-width: 950px), (pointer: coarse) and (max-width: 1200px)',
+			// мобильная раскладка только на реально узких экранах: широкий тач-экран
+			// (планшет/ландшафт) получает десктопную — она полностью работает от тапов
+			'(max-width: 950px), (pointer: coarse) and (max-width: 820px)',
 		)
 		const upd = () => {
 			setIsPortrait(pq.matches)
@@ -226,6 +240,40 @@ export default function PanelClient({
 			'element:lock',
 			({ id, by, until }: { id: string; by: string; until: number }) => {
 				setElementLocks(prev => ({ ...prev, [id]: { by, until } }))
+				// лок перехватили у нас (например, стример забрал элемент) — принудительно
+				// прекращаем перетаскивание и возвращаем элемент в серверную позицию:
+				// иначе на нашем экране он «уезжает» локально, хотя сервер другие изменения отклонил
+				if (by !== (userLogin ?? '')) {
+					if (dragRef.current?.id === id) {
+						dragRef.current = null
+						lastMoveRef.current = null
+						document.body.classList.remove('dragging')
+						const start = dragStartPosRef.current
+						if (start && start.id === id) {
+							setState(p => ({
+								...p,
+								elements: p.elements.map(e =>
+									e.id === id ? { ...e, x: start.x, y: start.y } : e,
+								),
+							}))
+						}
+					}
+					if (resizeRef.current?.id === id) {
+						resizeRef.current = null
+						document.body.classList.remove('dragging')
+						const snap = resizeSnapRef.current
+						if (snap && snap.id === id) {
+							setState(p => ({
+								...p,
+								elements: p.elements.map(e =>
+									e.id === id
+										? { ...e, x: snap.el.x, y: snap.el.y, width: snap.el.width, height: snap.el.height }
+										: e,
+								),
+							}))
+						}
+					}
+				}
 			},
 		)
 		socket.on('element:unlock', ({ id }: { id: string }) => {
@@ -689,9 +737,10 @@ export default function PanelClient({
 		if (selectedId !== interactiveIframeId) setInteractiveIframeId(null)
 	}, [selectedId, interactiveIframeId])
 
-	// Twitch-плеер превью через официальный SDK: URL-параметры автозапуска у плеера
-	// ненадёжны (браузер блокирует play() до применения мьюта — плеер остаётся на паузе),
-	// поэтому после READY/PAUSE/OFFLINE→ONLINE принудительно запускаем воспроизведение
+	// Twitch-превью фоном холста (как в pogly): стрим тянется напрямую с канала через
+	// официальный SDK. Оффлайн — Twitch сам показывает арт канала, при эфире — стрим.
+	// URL-параметры автозапуска ненадёжны (браузер блокирует play() до применения мьюта),
+	// поэтому после READY/PAUSE дёргаем play() по расписанию (~40 секунд страховки)
 	const twitchPreviewRef = useRef<HTMLDivElement | null>(null)
 	const twitchPlayerRef = useRef<any>(null)
 	// живой плеер прячется, когда канвас на экране уже 180px (иначе микроплеер ломается)
@@ -699,9 +748,6 @@ export default function PanelClient({
 
 	useEffect(() => {
 		if (!previewOn || !channel || !mounted) return
-		// канал заведомо не в эфире — вместо Twitch-плеера (у него поверх стрима свои
-		// надписи и постеры) показываем свой чистый плейсхолдер
-		if (twitchLive === false) return
 		// холст сильно отдалён — плеер в микроразмере ломается, не рендерим его вовсе
 		if (!playerActive) return
 		const target = twitchPreviewRef.current
@@ -709,67 +755,51 @@ export default function PanelClient({
 		let cancelled = false
 		let cleanupTimers: (() => void) | null = null
 
-		const boot = () => {
-			if (cancelled) return
-			const Tw = (window as any).Twitch
-			if (!Tw?.Player || !twitchPreviewRef.current) return
-			let resumeAttempts = 0
-			const player = new Tw.Player('twitch-preview', {
-				width: '100%',
-				height: '100%',
-				channel,
-				parent: parentHost,
-				autoplay: true,
-				muted: true,
-			})
-			twitchPlayerRef.current = player
-			const resume = () => {
-				try {
-					if (player.getMuted?.() === false) player.setMuted(true)
-					player.play()
-				} catch {}
-			}
-			player.addEventListener(Tw.Player.READY, () => setTimeout(resume, 200))
-			player.addEventListener(Tw.Player.PLAY, () => {
-				resumeAttempts = 0
-			})
-			player.addEventListener(Tw.Player.PAUSE, () => {
-				// авто-возобновление (до 6 попыток), чтобы браузерная блокировка автозапуска не оставляла плеер на паузе
-				if (resumeAttempts >= 6) return
-				resumeAttempts += 1
-				setTimeout(resume, 500)
-			})
-			player.addEventListener(Tw.Player.ONLINE, resume)
-			// страховка: на мобильных плеер цепляет HLS долго — дёргаем play() по расписание ~40 секунд
-			// (play() на уже играющем плеере — no-op)
-			const delays = [
-				300, 700, 1500, 2500, 4000, 6000, 8000, 11000, 14000, 18000, 22000,
-				26000, 30000, 35000, 40000,
-			]
-			const timers = delays.map(d =>
-				setTimeout(() => {
-					if (!cancelled) resume()
-				}, d),
-			)
-			cleanupTimers = () => timers.forEach(clearTimeout)
-		}
-
-		if ((window as any).Twitch?.Player) {
-			boot()
-		} else {
-			const existing = document.querySelector<HTMLScriptElement>(
-				'script[src*="embed.twitch.tv"]',
-			)
-			if (!existing) {
-				const s = document.createElement('script')
-				s.src = 'https://embed.twitch.tv/embed/v1.js'
-				s.async = true
-				s.onload = boot
-				document.body.appendChild(s)
-			} else {
-				existing.addEventListener('load', boot, { once: true })
-			}
-		}
+		;(async () => {
+			try {
+				const Tw = await loadTwitchSdk()
+				if (cancelled || !twitchPreviewRef.current) return
+				let resumeAttempts = 0
+				const player = new Tw.Player('twitch-preview', {
+					width: '100%',
+					height: '100%',
+					channel,
+					parent: parentHost,
+					autoplay: true,
+					muted: true,
+				})
+				twitchPlayerRef.current = player
+				const resume = () => {
+					try {
+						if (player.getMuted?.() === false) player.setMuted(true)
+						player.play()
+					} catch {}
+				}
+				player.addEventListener(Tw.Player.READY, () => setTimeout(resume, 200))
+				player.addEventListener(Tw.Player.PLAY, () => {
+					resumeAttempts = 0
+				})
+				player.addEventListener(Tw.Player.PAUSE, () => {
+					// авто-возобновление (до 6 попыток), чтобы браузерная блокировка автозапуска не оставляла плеер на паузе
+					if (resumeAttempts >= 6) return
+					resumeAttempts += 1
+					setTimeout(resume, 500)
+				})
+				player.addEventListener(Tw.Player.ONLINE, resume)
+				// страховка: на мобильных плеер цепляет HLS долго — дёргаем play() по расписанию ~40 секунд
+				// (play() на уже играющем плеере — no-op)
+				const delays = [
+					300, 700, 1500, 2500, 4000, 6000, 8000, 11000, 14000, 18000, 22000,
+					26000, 30000, 35000, 40000,
+				]
+				const timers = delays.map(d =>
+					setTimeout(() => {
+						if (!cancelled) resume()
+					}, d),
+				)
+				cleanupTimers = () => timers.forEach(clearTimeout)
+			} catch {}
+		})()
 
 		return () => {
 			cancelled = true
@@ -783,7 +813,6 @@ export default function PanelClient({
 		mounted,
 		previewKey,
 		parentHost,
-		twitchLive,
 		playerActive,
 	])
 
@@ -1248,11 +1277,57 @@ export default function PanelClient({
 		sx: number
 		sy: number
 	} | null>(null)
+	// серверная позиция тащимого элемента: если лок перехватили — откатываем элемент сюда
+	const dragStartPosRef = useRef<{ id: string; x: number; y: number } | null>(null)
+	// снимок элемента на старте ресайза — для такого же отката
+	const resizeSnapRef = useRef<{ id: string; el: StreamElement } | null>(null)
 
 	const handleDragStart = (e: React.PointerEvent, el: StreamElement) => {
 		if (el.locked) return
 		if (e.button !== 0) return
 		if (isLockedByOther(el.id)) return // объект тащит другой модератор
+		// ctrl/shift+клик — добавить/убрать элемент из выделения (без драга)
+		if (e.shiftKey || e.ctrlKey || e.metaKey) {
+			setSelectedIds(prev => {
+				const n = new Set(prev)
+				if (n.has(el.id)) n.delete(el.id)
+				else n.add(el.id)
+				return n
+			})
+			setSelectedId(null)
+			return
+		}
+		// драг выделенного при мультивыделении — двигаем всю группу
+		if (selectedIdsRef.current.has(el.id) && selectedIdsRef.current.size > 1) {
+			if (isLockedByOther(el.id)) return
+			e.preventDefault()
+			e.stopPropagation()
+			const items: { id: string; x: number; y: number }[] = []
+			for (const id of selectedIdsRef.current) {
+				if (isLockedByOther(id)) continue // заблокированные другими пропускаем
+				const it = stateRef.current.elements.find(x => x.id === id)
+				if (it && !it.locked) {
+					items.push({ id: it.id, x: it.x, y: it.y })
+					emit('element:grab', { id: it.id })
+				}
+			}
+			if (items.length < 2) {
+				setSelectedIds(new Set())
+				return
+			}
+			groupDragRef.current = {
+				sx: e.clientX,
+				sy: e.clientY,
+				dx: 0,
+				dy: 0,
+				items,
+				lastTick: 0,
+			}
+			document.body.classList.add('dragging')
+			return
+		}
+		// обычный клик по элементу — одиночное выделение
+		if (selectedIdsRef.current.size) setSelectedIds(new Set())
 		e.preventDefault()
 		e.stopPropagation()
 		emit('element:grab', { id: el.id })
@@ -1269,6 +1344,7 @@ export default function PanelClient({
 			sx: e.clientX,
 			sy: e.clientY,
 		}
+		dragStartPosRef.current = { id: el.id, x: el.x, y: el.y }
 		if (el.type !== 'iframe') setInteractiveIframeId(null)
 		document.body.classList.add('dragging')
 		setSelectedId(el.id)
@@ -1277,9 +1353,39 @@ export default function PanelClient({
 	// оптимистично двигаем локально; на сервер шлём не чаще ~30 раз/с, финал — на mouseup
 	const moveThrottleRef = useRef(0)
 	const lastMoveRef = useRef<{ id: string; x: number; y: number } | null>(null)
+	// групповое перемещение выбранных элементов
+	const groupDragRef = useRef<{
+		sx: number
+		sy: number
+		dx: number
+		dy: number
+		items: { id: string; x: number; y: number }[]
+		lastTick: number
+	} | null>(null)
 
 	const handleMouseMove = useCallback(
 		(e: PointerEvent) => {
+			const g = groupDragRef.current
+			if (g) {
+				g.dx = e.clientX - g.sx
+				g.dy = e.clientY - g.sy
+				const { dx, dy } = g
+				setState(p => ({
+					...p,
+					elements: p.elements.map(el => {
+						const it = g.items.find(i => i.id === el.id)
+						return it ? { ...el, x: Math.round(it.x + dx), y: Math.round(it.y + dy) } : el
+					}),
+				}))
+				const now = performance.now()
+				if (now - g.lastTick >= 33) {
+					g.lastTick = now
+					g.items.forEach(it =>
+						emit('element:move', { id: it.id, x: Math.round(it.x + dx), y: Math.round(it.y + dy) }),
+					)
+				}
+				return
+			}
 			if (!dragRef.current || !viewportRef.current) return
 			const { x: vx, y: vy, s } = viewRef.current
 			const rect = viewportRef.current.getBoundingClientRect()
@@ -1309,6 +1415,19 @@ export default function PanelClient({
 	)
 
 	const handleMouseUp = useCallback(() => {
+		const g = groupDragRef.current
+		if (g) {
+			// финальная позиция группы
+			g.items.forEach(it => {
+				const x = Math.round(it.x + g.dx)
+				const y = Math.round(it.y + g.dy)
+				if (x !== it.x || y !== it.y)
+					emit('element:move', { id: it.id, x, y })
+			})
+			groupDragRef.current = null
+			document.body.classList.remove('dragging')
+			return
+		}
 		const dr = dragRef.current
 		if (dr?.type === 'iframe' && !dr.moved) {
 			const el = stateRef.current.elements.find(x => x.id === dr.id)
@@ -1342,7 +1461,10 @@ export default function PanelClient({
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
-			if (e.key !== 'Delete' || !selectedId) return
+			if (e.key !== 'Delete') return
+			const ids = new Set(selectedIdsRef.current)
+			if (selectedId) ids.add(selectedId)
+			if (!ids.size) return
 			const t = e.target as HTMLElement | null
 			if (
 				t &&
@@ -1352,8 +1474,9 @@ export default function PanelClient({
 					t.isContentEditable)
 			)
 				return
-			emit('element:delete', selectedId)
+			ids.forEach(id => emit('element:delete', id))
 			setSelectedId(null)
+			setSelectedIds(new Set())
 		}
 		window.addEventListener('keydown', onKey)
 		return () => window.removeEventListener('keydown', onKey)
@@ -1392,6 +1515,7 @@ export default function PanelClient({
 			sy: e.clientY,
 			orig: { ...el },
 		}
+		resizeSnapRef.current = { id: el.id, el: { ...el } }
 	}
 
 	const handleResizeMove = useCallback(
@@ -1540,6 +1664,7 @@ export default function PanelClient({
 		const vp = canvasEl
 		if (!vp) return
 		const pointers = new Map<number, { x: number; y: number }>()
+		let marquee: { id: number; x1: number; y1: number } | null = null
 		let pan: {
 			id: number
 			x: number
@@ -1590,6 +1715,18 @@ export default function PanelClient({
 				return
 			}
 			if (e.button !== 0 || onNoPan) return
+			// мышь по пустому холсту — рамка мультивыделения (пан — средняя кнопка/тач)
+			if (e.pointerType === 'mouse' && !onEl) {
+				e.preventDefault() // без этого браузер выделяет текст под рамкой
+				const rect = vp.getBoundingClientRect()
+				marquee = {
+					id: e.pointerId,
+					x1: e.clientX - rect.left,
+					y1: e.clientY - rect.top,
+				}
+				setMarquee({ x1: marquee.x1, y1: marquee.y1, x2: marquee.x1, y2: marquee.y1 })
+				return
+			}
 			pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
 			if (pointers.size === 2) {
 				// второй палец — щипок, гасим драг/поворот/ресайз и панораму
@@ -1608,6 +1745,13 @@ export default function PanelClient({
 		}
 
 		const move = (e: PointerEvent) => {
+			if (marquee && e.pointerId === marquee.id) {
+				const rect = vp.getBoundingClientRect()
+				setMarquee(m =>
+					m ? { ...m, x2: e.clientX - rect.left, y2: e.clientY - rect.top } : m,
+				)
+				return
+			}
 			const pt = pointers.get(e.pointerId)
 			if (!pt) return
 			pt.x = e.clientX
@@ -1638,6 +1782,39 @@ export default function PanelClient({
 		}
 
 		const up = (e: PointerEvent) => {
+			if (marquee && e.pointerId === marquee.id) {
+				const m = marquee
+				marquee = null
+				const rect = vp.getBoundingClientRect()
+				setMarquee(null)
+				// отменяем совместимые mouse-события: иначе следующий click по холсту
+				// сразу стирает только что сделанное выделение
+				e.preventDefault()
+				// экран -> мир
+				const s = viewRef.current.s
+				const wx1 = (Math.min(m.x1, e.clientX - rect.left) - viewRef.current.x) / s
+				const wy1 = (Math.min(m.y1, e.clientY - rect.top) - viewRef.current.y) / s
+				const wx2 = (Math.max(m.x1, e.clientX - rect.left) - viewRef.current.x) / s
+				const wy2 = (Math.max(m.y1, e.clientY - rect.top) - viewRef.current.y) / s
+				if (wx2 - wx1 < 5 && wy2 - wy1 < 5) {
+					// клик по пустому — снять выделение
+					setSelectedIds(new Set())
+					return
+				}
+				const hits = stateRef.current.elements
+					.filter(
+						el =>
+							el.visible !== false &&
+							el.x < wx2 &&
+							el.x + el.width > wx1 &&
+							el.y < wy2 &&
+							el.y + el.height > wy1,
+					)
+					.map(el => el.id)
+				setSelectedIds(new Set(hits))
+				if (hits.length) setSelectedId(null)
+				return
+			}
 			pointers.delete(e.pointerId)
 			if (pan && e.pointerId === pan.id) {
 				pan = null
@@ -1978,6 +2155,7 @@ export default function PanelClient({
 						onClick={e => {
 							if (e.target === e.currentTarget) {
 								setSelectedId(null)
+								setSelectedIds(new Set())
 								setInteractiveIframeId(null)
 							}
 						}}
@@ -2037,31 +2215,29 @@ export default function PanelClient({
 								height: state.canvasH * view.s,
 							}}
 						>
-							<div
-								className='absolute inset-0 opacity-10'
-								style={{
-									backgroundImage:
-										'linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)',
-									backgroundSize: `${40 * view.s}px ${40 * view.s}px`,
-								}}
-							/>
-							{mounted &&
-								previewOn &&
-								channel &&
-								twitchLive !== false &&
-								playerActive && (
-									<div
-										key={previewKey}
-										ref={twitchPreviewRef}
-										id='twitch-preview'
-										className='absolute inset-0'
-									/>
-								)}
+							{/* решётка-текстура только пока стрим не показан: поверх видео её не кладём */}
+							{!(mounted && previewOn && channel && playerActive) && (
+								<div
+									className='absolute inset-0 opacity-10'
+									style={{
+										backgroundImage:
+											'linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)',
+										backgroundSize: `${40 * view.s}px ${40 * view.s}px`,
+									}}
+								/>
+							)}
+							{mounted && previewOn && channel && playerActive && (
+								<div
+									key={previewKey}
+									ref={twitchPreviewRef}
+									id='twitch-preview'
+									className='absolute inset-0'
+								/>
+							)}
 							{/* холст сильно отдалён: вместо сломанного микроплеера — чистый бейдж LIVE */}
 							{mounted &&
 								previewOn &&
 								channel &&
-								twitchLive !== false &&
 								!playerActive && (
 									<div className='absolute inset-0 flex items-center justify-center pointer-events-none'>
 										<span
@@ -2086,44 +2262,7 @@ export default function PanelClient({
 										</span>
 									</div>
 								)}
-							{mounted &&
-								previewOn &&
-								channel &&
-								twitchLive === false &&
-								previewBoxW >= 180 && (
-									<div className='absolute inset-0 flex flex-col items-center justify-center gap-1 overflow-hidden px-2 text-center'>
-										{/* шрифт масштабируется вместе с канвасом; при сильном отдалении текст
-                        сначала укорачивается до «Не в эфире», затем скрывается совсем */}
-										<span
-											className='font-medium text-gray-400'
-											style={{
-												fontSize: Math.max(
-													8,
-													Math.min(16, previewBoxW * 0.035),
-												),
-												lineHeight: 1.2,
-											}}
-										>
-											{previewBoxW >= 380 ? 'Канал не в эфире' : 'Не в эфире'}
-										</span>
-										{previewBoxW >= 380 && (
-											<span
-												className='text-gray-600'
-												style={{
-													fontSize: Math.max(
-														8,
-														Math.min(12, previewBoxW * 0.026),
-													),
-													lineHeight: 1.2,
-												}}
-											>
-												Превью включится автоматически, когда стример начнёт
-												стрим
-											</span>
-										)}
-									</div>
-								)}
-						</div>
+					</div>
 						<div
 							className='absolute left-0 top-0'
 							style={{
@@ -2205,7 +2344,9 @@ export default function PanelClient({
 											outline:
 												selectedId === el.id
 													? `${2 / view.s}px solid rgb(var(--c-accent2))`
-													: undefined,
+													: selectedIds.has(el.id)
+														? `${1.5 / view.s}px solid rgb(var(--c-accent2) / .6)`
+														: undefined,
 											transform:
 												`${el.rotation ? `rotate(${el.rotation}deg)` : ''}${el.flipH || el.flipV ? ` scale(${el.flipH ? -1 : 1}, ${el.flipV ? -1 : 1})` : ''}` ||
 												undefined,
@@ -2433,6 +2574,17 @@ export default function PanelClient({
 								))}
 						</div>
 						{previewPill}
+						{marquee && (
+							<div
+								className='absolute z-30 pointer-events-none border border-accent2 bg-accent2/20'
+								style={{
+									left: Math.min(marquee.x1, marquee.x2),
+									top: Math.min(marquee.y1, marquee.y2),
+									width: Math.abs(marquee.x2 - marquee.x1),
+									height: Math.abs(marquee.y2 - marquee.y1),
+								}}
+							/>
+						)}
 						{dropHover && (
 							<div className='absolute inset-0 z-30 pointer-events-none flex items-center justify-center bg-black/40 border-2 border-dashed border-accent rounded-lg'>
 								<span className='text-sm text-gray-200 bg-panel/95 border border-border px-4 py-2 rounded-lg'>
