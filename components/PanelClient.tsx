@@ -2293,8 +2293,10 @@ export default function PanelClient({
 						onClick={e => {
 							if (e.target === e.currentTarget) {
 								setSelectedId(null)
-								setSelectedIds(new Set())
 								setInteractiveIframeId(null)
+								// selectedIds здесь НЕ чистим: браузерный click после рамки
+								// стирал бы только что сделанное выделение; рамка сама
+								// снимает выделение кликом без движения
 							}
 						}}
 						onDragEnter={e => {
@@ -2343,20 +2345,10 @@ export default function PanelClient({
 						}}
 					>
 						{/* фон канваса + превью: ВНЕ transform-контейнера (transform предка блокирует
-                  автовоспроизведение Twitch-плеера). Как в pogly: стрим всегда на весь
-                  экран редактора и НЕ скейлится зумом; рамка отмечает границы холста */}
-						{mounted && previewOn && channel && (
-							<div className='absolute inset-0 bg-black overflow-hidden'>
-								<div
-									key={previewKey}
-									ref={twitchPreviewRef}
-									id='twitch-preview'
-									className='absolute inset-0'
-								/>
-							</div>
-						)}
+                  автовоспроизведение Twitch-плеера), позиционируем в экранных координатах view.
+                  Чёрный квадрат холста со стримом внутри, скейлится вместе с зумом */}
 						<div
-							className='absolute bg-transparent border border-border rounded-md pointer-events-none'
+							className='absolute bg-black border border-border rounded-md pointer-events-none overflow-hidden'
 							style={{
 								left: view.x,
 								top: view.y,
@@ -2372,6 +2364,14 @@ export default function PanelClient({
 											'linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)',
 										backgroundSize: `${40 * view.s}px ${40 * view.s}px`,
 									}}
+								/>
+							)}
+							{mounted && previewOn && channel && (
+								<div
+									key={previewKey}
+									ref={twitchPreviewRef}
+									id='twitch-preview'
+									className='absolute inset-0'
 								/>
 							)}
 					</div>
