@@ -2395,50 +2395,38 @@ export default function PanelClient({
 						}}
 					>
 						{/* фон канваса + превью: ВНЕ transform-контейнера (transform предка блокирует
-                  автовоспроизведение Twitch-плеера). Как в pogly: стрим занимает весь экран
-                  редактора с ФИКСИРОВАННЫМ размером — зум его не меняет, поэтому плеер
-                  не перерисовывается и не глючит. Рамка показывает границы холста */}
-						{mounted && previewOn && channel && (
-							<div className='absolute inset-0 bg-black overflow-hidden'>
+                  автовоспроизведение Twitch-плеера). Бокс скейлится с зумом, но не меньше
+                  320px по ширине на экране — при отдалении остаётся читаемым, как в pogly */}
+						<div
+							className='absolute bg-black border border-border rounded-md pointer-events-none overflow-hidden'
+							style={{
+								left: pvX,
+								top: pvY,
+								width: pvW,
+								height: pvH,
+							}}
+						>
+							{!(mounted && previewOn && channel) && (
+								<div
+									className='absolute inset-0 opacity-10'
+									style={{
+										backgroundImage:
+											'linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)',
+										backgroundSize: `${40 * view.s}px ${40 * view.s}px`,
+									}}
+								/>
+							)}
+							{mounted && previewOn && channel && (
 								<div
 									key={previewKey}
 									ref={twitchPreviewRef}
 									id='twitch-preview'
 									className='absolute inset-0'
 								/>
-								<div
-									className='absolute rounded-md border border-border/70 pointer-events-none'
-									style={{
-										left: view.x,
-										top: view.y,
-										width: state.canvasW * view.s,
-										height: state.canvasH * view.s,
-									}}
-								/>
-							</div>
-						)}
-						{!(mounted && previewOn && channel) && (
-							<div
-								className='absolute bg-black border border-border rounded-md pointer-events-none overflow-hidden'
-								style={{
-									left: view.x,
-									top: view.y,
-									width: state.canvasW * view.s,
-									height: state.canvasH * view.s,
-								}}
-							>
-									<div
-										className='absolute inset-0 opacity-10'
-										style={{
-											backgroundImage:
-												'linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)',
-											backgroundSize: `${40 * view.s}px ${40 * view.s}px`,
-										}}
-									/>
-								</div>
 							)}
-							<div
-								className='absolute left-0 top-0'
+					</div>
+						<div
+							className='absolute left-0 top-0'
 							style={{
 								transform: `translate(${view.x}px, ${view.y}px) scale(${view.s})`,
 								transformOrigin: '0 0',
