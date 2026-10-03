@@ -2038,11 +2038,17 @@ export default function PanelClient({
 	}
 
 	// пилюля Превью: на ПК и мобильном — закреплена в правом нижнем углу окна превью
-	// бокс превью: скейлится с зумом, но не меньше 320px по ширине на экране —
-	// при сильном отдалении остаётся читаемым (как в pogly), центр — на центре холста
-	const pvMinW = 320
-	const pvW = Math.max(state.canvasW * view.s, pvMinW)
-	const pvH = Math.max(state.canvasH * view.s, (pvW * state.canvasH) / state.canvasW)
+	// бокс превью: скейлится с зумом, но не меньше 360×203 на экране (16:9) —
+	// при сильном отдалении остаётся читаемым плеером, как в pogly, а не полоской
+	const pvMinW = 360
+	const pvMinH = 203
+	const pvK = Math.max(
+		1,
+		pvMinW / (state.canvasW * view.s),
+		pvMinH / (state.canvasH * view.s),
+	)
+	const pvW = state.canvasW * view.s * pvK
+	const pvH = state.canvasH * view.s * pvK
 	const pvX = view.x + (state.canvasW * view.s - pvW) / 2
 	const pvY = view.y + (state.canvasH * view.s - pvH) / 2
 	const previewPill = (
