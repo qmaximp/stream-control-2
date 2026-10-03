@@ -1371,6 +1371,14 @@ export default function PanelClient({
 		lastTick: number
 	} | null>(null)
 	// масштабирование группы за угловую ручку бокса
+	// вращение группы выбранных элементов вокруг центра группы
+	const groupRotateRef = useRef<{
+		cx: number
+		cy: number
+		startAngle: number
+		items: { id: string; cx: number; cy: number; rotation: number }[]
+		lastTick: number
+	} | null>(null)
 	const groupScaleRef = useRef<{
 		sx: number
 		sy: number
@@ -1387,6 +1395,58 @@ export default function PanelClient({
 
 	const handleMouseMove = useCallback(
 		(e: PointerEvent) => {
+			const { x: vx, y: vy, s } = viewRef.current
+			const rect = viewportRef.current?.getBoundingClientRect()
+			const gr = groupRotateRef.current
+			if (gr && rect) {
+				// вращение группы: все выбранные элементы вращаются вокруг центра группы
+				const px = (e.clientX - rect.left - vx) / s
+				const py = (e.clientY - rect.top - vy) / s
+				let ang = (Math.atan2(py - gr.cy, px - gr.cx) * 180) / Math.PI - gr.startAngle
+				if (e.shiftKey) ang = Math.round(ang / 15) * 15 // шаг 15° с зажатым Shift
+				const rad = (ang * Math.PI) / 180
+				const c = Math.cos(rad)
+				const sn = Math.sin(rad)
+				setState(p => ({
+					...p,
+					elements: p.elements.map(el => {
+						const it = gr.items.find(
+							(i: { id: string; cx: number; cy: number; rotation: number }) =>
+								i.id === el.id,
+						)
+						if (!it) return el
+						const dx = it.cx - gr.cx
+						const dy = it.cy - gr.cy
+						const ncx = gr.cx + dx * c - dy * sn
+						const ncy = gr.cy + dx * sn + dy * c
+						const rotation = Math.round((((it.rotation + ang) % 360) + 360) % 360)
+						return {
+							...el,
+							x: Math.round(ncx - el.width / 2),
+							y: Math.round(ncy - el.height / 2),
+							rotation,
+						}
+					}),
+				}))
+				const now = performance.now()
+				if (now - gr.lastTick >= 100) {
+					gr.lastTick = now
+					gr.items.forEach(
+						(it: { id: string; cx: number; cy: number; rotation: number }) => {
+							const el = stateRef.current.elements.find(
+								x => x.id === it.id,
+							)
+							if (el)
+								updateElement(it.id, {
+									x: el.x,
+									y: el.y,
+									rotation: el.rotation,
+								})
+						},
+					)
+				}
+				return
+			}
 			const gs = groupScaleRef.current
 			if (gs) {
 				// дельта курсора — в экранных пикселях: переводим в мировые (делим на зум),
@@ -1402,6 +1462,12 @@ export default function PanelClient({
 				if (gs.corner.includes('n')) fy = (gs.bh - gs.dy) / gs.bh
 				fx = Math.max(0.05, fx)
 				fy = Math.max(0.05, fy)
+				// Shift — масштаб с сохранением пропорций группы
+				if (e.shiftKey) {
+					const k = Math.max(fx, fy)
+					fx = k
+					fy = k
+				}
 				// неподвижный угол — противоположный тянемому
 				const ox = gs.corner.includes('w') ? gs.bx + gs.bw : gs.bx
 				const oy = gs.corner.includes('n') ? gs.by + gs.bh : gs.by
@@ -1466,9 +1532,7 @@ export default function PanelClient({
 				}
 				return
 			}
-			if (!dragRef.current || !viewportRef.current) return
-			const { x: vx, y: vy, s } = viewRef.current
-			const rect = viewportRef.current.getBoundingClientRect()
+			if (!dragRef.current || !viewportRef.current || !rect) return
 			const lx = (e.clientX - rect.left - vx) / s
 			const ly = (e.clientY - rect.top - vy) / s
 			if (
@@ -1510,6 +1574,11 @@ export default function PanelClient({
 					})
 			})
 			groupScaleRef.current = null
+			document.body.classList.remove('dragging')
+			return
+		}
+		if (groupRotateRef.current) {
+			groupRotateRef.current = null
 			document.body.classList.remove('dragging')
 			return
 		}
@@ -1583,6 +1652,48 @@ export default function PanelClient({
 			document.body.classList.add('dragging')
 		},
 		[emit, isLockedByOther],
+	)
+
+	// тянем ручку вращения группы: все выбранные элементы вращаются вокруг центра группы
+	const startGroupRotate = useCallback(
+		(e: React.PointerEvent) => {
+			if (e.button !== 0 || !groupBox || !viewportRef.current) return
+			e.preventDefault()
+			e.stopPropagation()
+			const { x: vx, y: vy, s } = viewRef.current
+			const rect = viewportRef.current.getBoundingClientRect()
+			const px = (e.clientX - rect.left - vx) / s
+			const py = (e.clientY - rect.top - vy) / s
+			const cx = groupBox.x + groupBox.w / 2
+			const cy = groupBox.y + groupBox.h / 2
+			const items: {
+				id: string
+				cx: number
+				cy: number
+				rotation: number
+			}[] = []
+			for (const id of selectedIdsRef.current) {
+				const it = stateRef.current.elements.find(x => x.id === id)
+				if (it && !it.locked && !isLockedByOther(id))
+					items.push({
+						id,
+						cx: it.x + it.width / 2,
+						cy: it.y + it.height / 2,
+						rotation: it.rotation ?? 0,
+					})
+			}
+			if (items.length < 2) return
+			items.forEach(it => emit('element:grab', { id: it.id }))
+			groupRotateRef.current = {
+				cx,
+				cy,
+				startAngle: (Math.atan2(py - cy, px - cx) * 180) / Math.PI,
+				items,
+				lastTick: 0,
+			}
+			document.body.classList.add('dragging')
+		},
+		[groupBox, emit, isLockedByOther],
 	)
 
 	// тянем угловую ручку бокса — масштабируем всю группу
@@ -2823,8 +2934,36 @@ export default function PanelClient({
 											onPointerDown={e => startGroupScale(e, corner)}
 										/>
 									))}
-								</>
-							)}
+									<div
+										className='absolute rounded-full flex items-center justify-center pointer-events-auto'
+										data-nopan='1'
+										style={{
+										left: groupBox.x + groupBox.w / 2 - 11 / view.s,
+										top: groupBox.y - 44 / view.s,
+										width: 22 / view.s,
+										height: 22 / view.s,
+										background: 'rgb(var(--c-accent))',
+											border: `${2 / view.s}px solid #fff`,
+										cursor: 'grab',
+										boxShadow: '0 1px 6px rgba(0,0,0,.5)',
+									}}
+									onPointerDown={startGroupRotate}
+									title='Повернуть группу (Shift — шаг 15°)'
+									>
+										<svg
+											width={12 / view.s}
+											height={12 / view.s}
+											viewBox='0 0 24 24'
+											fill='none'
+											stroke='#fff'
+											strokeWidth='2.5'
+											strokeLinecap='round'
+										>
+											<path d="M21 12a9 9 0 1 1-2.64-6.36" />
+											<path d="M21 3v6h-6" />
+										</svg>
+									</div>
+								</>					)}
 							{/* курсоры других участников: контр-скейл, чтобы курсор был одного размера на любом зуме */}
 							{remoteCursors
 								.filter(c => !c.hidden)
