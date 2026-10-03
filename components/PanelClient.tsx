@@ -1699,33 +1699,61 @@ export default function PanelClient({
 			const { dir, orig } = resizeRef.current
 			const { x: vx, y: vy, s } = viewRef.current
 			const rect = viewportRef.current.getBoundingClientRect()
-			const lx = (e.clientX - rect.left - vx) / s
-			const ly = (e.clientY - rect.top - vy) / s
+			// курсор в мировых координатах
+			const px = (e.clientX - rect.left - vx) / s
+			const py = (e.clientY - rect.top - vy) / s
+			// визуальные оси элемента (поворот + зеркалирование): ресайз тянется вдоль них
+			const th = ((orig.rotation ?? 0) * Math.PI) / 180
+			const cos = Math.cos(th)
+			const sin = Math.sin(th)
+			const fx = orig.flipH ? -1 : 1
+			const fy = orig.flipV ? -1 : 1
+			const axX = fx * cos
+			const axY = fx * sin
+			const ayX = -fy * sin
+			const ayY = fy * cos
+			// дельта курсора от начала драга, разложенная на оси элемента
+			const dxw = (e.clientX - resizeRef.current.sx) / s
+			const dyw = (e.clientY - resizeRef.current.sy) / s
+			const lvx = dxw * cos + dyw * sin
+			const lvy = -dxw * sin + dyw * cos
+			const cx0 = orig.x + orig.width / 2
+			const cy0 = orig.y + orig.height / 2
 			let width, height, x, y
+			const signX = dir.includes('w') ? -1 : dir.includes('e') ? 1 : 0
+			const signY = dir.includes('n') ? -1 : dir.includes('s') ? 1 : 0
 			if (dir.length === 2 && e.shiftKey) {
-				const ox = dir.includes('w') ? orig.x + orig.width : orig.x
-				const oy = dir.includes('n') ? orig.y + orig.height : orig.y
+				// пропорционально: фиксированный угол — противоположный тянемому
+				const fixX = cx0 - axX * (orig.width / 2) * signX - ayX * (orig.height / 2) * signY
+				const fixY = cy0 - axY * (orig.width / 2) * signX - ayY * (orig.height / 2) * signY
+				const dvx = (px - fixX) * axX + (py - fixY) * axY
+				const dvy = (px - fixX) * ayX + (py - fixY) * ayY
 				const k = Math.max(
-					Math.abs(lx - ox) / Math.max(orig.width, 1),
-					Math.abs(ly - oy) / Math.max(orig.height, 1),
+					Math.abs(dvx) / Math.max(orig.width, 1),
+					Math.abs(dvy) / Math.max(orig.height, 1),
+					30 / Math.max(orig.width, 1),
+					20 / Math.max(orig.height, 1),
 				)
 				width = Math.max(30, Math.round(orig.width * k))
 				height = Math.max(20, Math.round(orig.height * k))
-				x = Math.round(dir.includes('w') ? ox - width : orig.x)
-				y = Math.round(dir.includes('n') ? oy - height : orig.y)
+				// центр относительно фиксированного угла
+				const ncx = fixX + axX * (width / 2) * signX + ayX * (height / 2) * signY
+				const ncy = fixY + axY * (width / 2) * signX + ayY * (height / 2) * signY
+				x = Math.round(ncx - width / 2)
+				y = Math.round(ncy - height / 2)
 			} else {
-				const dx = (e.clientX - resizeRef.current.sx) / s
-				const dy = (e.clientY - resizeRef.current.sy) / s
-				let dw = 0,
-					dh = 0
-				if (dir.includes('e')) dw = dx
-				if (dir.includes('w')) dw = -dx
-				if (dir.includes('s')) dh = dy
-				if (dir.includes('n')) dh = -dy
-				width = Math.max(30, Math.round(orig.width + dw))
-				height = Math.max(20, Math.round(orig.height + dh))
-				x = Math.round(orig.x + (dir.includes('w') ? orig.width - width : 0))
-				y = Math.round(orig.y + (dir.includes('n') ? orig.height - height : 0))
+				// рост вдоль осей элемента; противоположная грань остаётся на месте —
+				// для этого центр смещается на половину прироста вдоль той же оси
+				const dW = dir.includes('e') ? lvx : dir.includes('w') ? -lvx : 0
+				const dH = dir.includes('s') ? lvy : dir.includes('n') ? -lvy : 0
+				width = Math.max(30, Math.round(orig.width + dW))
+				height = Math.max(20, Math.round(orig.height + dH))
+				const appliedW = width - orig.width
+				const appliedH = height - orig.height
+				const ncx = cx0 + axX * (appliedW / 2) * signX + ayX * (appliedH / 2) * signY
+				const ncy = cy0 + axY * (appliedW / 2) * signX + ayY * (appliedH / 2) * signY
+				x = Math.round(ncx - width / 2)
+				y = Math.round(ncy - height / 2)
 			}
 			setState(p => ({
 				...p,
