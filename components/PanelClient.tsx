@@ -2038,16 +2038,10 @@ export default function PanelClient({
 	}
 
 	// пилюля Превью: на ПК и мобильном — закреплена в правом нижнем углу окна превью
-	// бокс превью (как в pogly): скейлится с зумом только ДО 67% базового масштаба,
-	// ниже — размер ФИКСИРОВАННЫЙ на экране (~2/3 размера холста при 100%): плеер
-	// не ресайзится при каждом шаге зума (нет глитчей) и остаётся читаемым при отдалении
-	const pvBaseW = state.canvasW * (baseViewRef.current?.s ?? view.s)
-	const pvBaseH = state.canvasH * (baseViewRef.current?.s ?? view.s)
-	const pvK = Math.max(1, (pvBaseW * 0.67) / (state.canvasW * view.s))
-	const pvW = state.canvasW * view.s * pvK
-	const pvH = state.canvasH * view.s * pvK
-	const pvX = view.x + (state.canvasW * view.s - pvW) / 2
-	const pvY = view.y + (state.canvasH * view.s - pvH) / 2
+	// плеер превью рендерится ОДИН РАЗ в фиксированном размере (как при 100% зума)
+	// и визуально уменьшается только CSS-transform'ом вместе с холстом: iframe никогда
+	// не меняет размер — Twitch-плеер не перерисовывается при зуме и не глючит
+	const pvBaseS = baseViewRef.current?.s ?? view.s
 	const previewPill = (
 		<div
 			className='absolute right-4 bottom-3 z-10 flex items-center gap-2 bg-panel border border-border rounded-full pl-3 pr-3 py-1.5 pointer-events-auto'
@@ -2392,56 +2386,47 @@ export default function PanelClient({
 						}}
 					>
 						{/* фон канваса + превью: ВНЕ transform-контейнера (transform предка блокирует
-                  автовоспроизведение Twitch-плеера). Как в pogly: бокс стрима скейлится
-                  с зумом до 67% базового масштаба, ниже держит ФИКСИРОВАННЫЙ экранный
-                  размер (плеер не ресайзится и не глючит) и центрируется на холсте */}
+                  автовоспроизведение Twitch-плеера). Чёрный бокс = границы холста, скейлится
+                  с зумом. Плеер внутри рендерится ОДИН РАЗ в размере 100%-зума и визуально
+                  сжимается transform'ом вместе с боксом: iframe никогда не меняет размер,
+                  Twitch-плеер не перерисовывается при зуме и не глючит */}
 						<div
-							className='absolute rounded-md border border-border/50 pointer-events-none'
+							className='absolute bg-black border border-border rounded-md pointer-events-none overflow-hidden'
 							style={{
 								left: view.x,
 								top: view.y,
 								width: state.canvasW * view.s,
 								height: state.canvasH * view.s,
 							}}
-						/>
-						{mounted && previewOn && channel && (
-							<div
-								className='absolute bg-black border border-border rounded-md pointer-events-none overflow-hidden'
-								style={{
-									left: pvX,
-									top: pvY,
-									width: pvW,
-									height: pvH,
-								}}
-							>
+						>
+							{mounted && previewOn && channel && (
 								<div
-									key={previewKey}
-									ref={twitchPreviewRef}
-									id='twitch-preview'
-									className='absolute inset-0'
-								/>
-							</div>
-						)}
-						{!(mounted && previewOn && channel) && (
-							<div
-								className='absolute bg-black border border-border rounded-md pointer-events-none overflow-hidden'
-								style={{
-									left: view.x,
-									top: view.y,
-									width: state.canvasW * view.s,
-									height: state.canvasH * view.s,
-								}}
-							>
+									style={{
+										width: state.canvasW * pvBaseS,
+										height: state.canvasH * pvBaseS,
+										transform: `scale(${view.s / pvBaseS})`,
+										transformOrigin: '0 0',
+									}}
+								>
 									<div
-										className='absolute inset-0 opacity-10'
-										style={{
-											backgroundImage:
-												'linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)',
-											backgroundSize: `${40 * view.s}px ${40 * view.s}px`,
-										}}
+										key={previewKey}
+										ref={twitchPreviewRef}
+										id='twitch-preview'
+										className='absolute inset-0'
 									/>
 								</div>
 							)}
+							{!(mounted && previewOn && channel) && (
+								<div
+									className='absolute inset-0 opacity-10'
+									style={{
+										backgroundImage:
+											'linear-gradient(#444 1px, transparent 1px), linear-gradient(90deg, #444 1px, transparent 1px)',
+										backgroundSize: `${40 * view.s}px ${40 * view.s}px`,
+									}}
+								/>
+							)}
+						</div>
 							<div
 								className='absolute left-0 top-0'
 							style={{
