@@ -2038,15 +2038,12 @@ export default function PanelClient({
 	}
 
 	// пилюля Превью: на ПК и мобильном — закреплена в правом нижнем углу окна превью
-	// бокс превью: скейлится с зумом, но не меньше 360×203 на экране (16:9) —
-	// при сильном отдалении остаётся читаемым плеером, как в pogly, а не полоской
-	const pvMinW = 360
-	const pvMinH = 203
-	const pvK = Math.max(
-		1,
-		pvMinW / (state.canvasW * view.s),
-		pvMinH / (state.canvasH * view.s),
-	)
+	// бокс превью (как в pogly): скейлится с зумом только ДО 67% базового масштаба,
+	// ниже — размер ФИКСИРОВАННЫЙ на экране (~2/3 размера холста при 100%): плеер
+	// не ресайзится при каждом шаге зума (нет глитчей) и остаётся читаемым при отдалении
+	const pvBaseW = state.canvasW * (baseViewRef.current?.s ?? view.s)
+	const pvBaseH = state.canvasH * (baseViewRef.current?.s ?? view.s)
+	const pvK = Math.max(1, (pvBaseW * 0.67) / (state.canvasW * view.s))
 	const pvW = state.canvasW * view.s * pvK
 	const pvH = state.canvasH * view.s * pvK
 	const pvX = view.x + (state.canvasW * view.s - pvW) / 2
@@ -2395,25 +2392,33 @@ export default function PanelClient({
 						}}
 					>
 						{/* фон канваса + превью: ВНЕ transform-контейнера (transform предка блокирует
-                  автовоспроизведение Twitch-плеера). Как в pogly: стрим занимает весь экран
-                  редактора с ФИКСИРОВАННЫМ размером — зум его не меняет, поэтому плеер
-                  не перерисовывается и не глючит. Рамка показывает границы холста */}
+                  автовоспроизведение Twitch-плеера). Как в pogly: бокс стрима скейлится
+                  с зумом до 67% базового масштаба, ниже держит ФИКСИРОВАННЫЙ экранный
+                  размер (плеер не ресайзится и не глючит) и центрируется на холсте */}
+						<div
+							className='absolute rounded-md border border-border/50 pointer-events-none'
+							style={{
+								left: view.x,
+								top: view.y,
+								width: state.canvasW * view.s,
+								height: state.canvasH * view.s,
+							}}
+						/>
 						{mounted && previewOn && channel && (
-							<div className='absolute inset-0 bg-black overflow-hidden'>
+							<div
+								className='absolute bg-black border border-border rounded-md pointer-events-none overflow-hidden'
+								style={{
+									left: pvX,
+									top: pvY,
+									width: pvW,
+									height: pvH,
+								}}
+							>
 								<div
 									key={previewKey}
 									ref={twitchPreviewRef}
 									id='twitch-preview'
 									className='absolute inset-0'
-								/>
-								<div
-									className='absolute rounded-md border border-border/70 pointer-events-none'
-									style={{
-										left: view.x,
-										top: view.y,
-										width: state.canvasW * view.s,
-										height: state.canvasH * view.s,
-									}}
 								/>
 							</div>
 						)}
